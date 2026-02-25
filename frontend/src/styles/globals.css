@@ -1,0 +1,100 @@
+:root {
+  /* Core palette — deep navy-black with electric accents */
+  --bg-0:     #050609;
+  --bg-1:     #080b12;
+  --bg-2:     #0c1018;
+  --bg-3:     #101520;
+  --bg-4:     #141b28;
+  --border-1: #151d2e;
+  --border-2: #1e2a40;
+  --border-3: #283850;
+
+  /* Accents */
+  --cyan:     #00d4ff;
+  --cyan-dim: rgba(0, 212, 255, 0.12);
+  --cyan-glow:rgba(0, 212, 255, 0.25);
+  --violet:   #a78bfa;
+  --violet-dim:rgba(167, 139, 250, 0.12);
+  --emerald:  #34d399;
+  --emerald-dim:rgba(52, 211, 153, 0.12);
+  --rose:     #fb7185;
+  --rose-dim: rgba(251, 113, 133, 0.12);
+  --amber:    #fbbf24;
+  --amber-dim:rgba(251, 191, 36, 0.12);
+
+  /* Text */
+  --text-1:   #e2e8f4;
+  --text-2:   #7c8ea8;
+  --text-3:   #3d4e65;
+  --text-4:   #1e2c3d;
+
+  /* Status colors */
+  --status-running:   #00d4ff;
+  --status-queued:    #a78bfa;
+  --status-success:   #34d399;
+  --status-failed:    #fb7185;
+  --status-retrying:  #fbbf24;
+  --status-paused:    #fde68a;
+  --status-cancelled: #4a5568;
+
+  /* Typography */
+  --font-mono:    'DM Mono', monospace;
+  --font-display: 'Clash Display', 'DM Mono', monospace;
+
+  /* Spacing */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+}
+
+/* ── BASE ──────────────────────────────────────────────────── */
+html { scroll-behavior: smooth; }
+
+a { color: inherit; text-decoration: none; }
+
+/* ── GRID TEXTURE ────────────────────────────────────────── */
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(0, 212, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.018) 1px, transparent 1px);
+  background-size: 52px 52px;
+}
+
+/* ── ANIMATIONS ─────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 currentColor; }
+  50%       { opacity: .7; box-shadow: 0 0 0 4px transparent; }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+@keyframes blink { 50% { opacity: .4; } }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.animate-slide-up { animation: slide-up .25s ease both; }
+.animate-fade-in  { animation: fade-in .2s ease both; }
+
+/* ── SKELETON ───────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-3) 25%, var(--bg-4) 50%, var(--bg-3) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* ── SCROLLBAR ──────────────────────────────────────────── */
+* { scrollbar-width: thin; scrollbar-color: var(--border-2) transparent; }

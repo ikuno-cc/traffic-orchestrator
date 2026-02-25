@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Traffic Orchestrator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    :root {
+      --bg:        #090b10;
+      --bg2:       #0e1117;
+      --bg3:       #141820;
+      --border:    #1e2530;
+      --border2:   #283040;
+      --accent:    #00e5ff;
+      --accent2:   #7c5cfc;
+      --accent3:   #ff6b6b;
+      --accent4:   #39d98a;
+      --text:      #e2e8f0;
+      --text2:     #8892a4;
+      --text3:     #4a5568;
+      --warn:      #f6ad55;
+    }
+    
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background-image:
+        linear-gradient(rgba(0,229,255,.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,229,255,.02) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+</body>
+</html>
