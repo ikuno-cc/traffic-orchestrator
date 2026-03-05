@@ -2,12 +2,14 @@ import json
 import os
 import re
 import time
+import base64
 from datetime import datetime
 from typing import Any, Optional
 
 import redis
 import requests as http_requests
 
+from app.supabase_sync import is_supabase_enabled, sync_request_to_supabase
 from workers.celery_app import celery_app
 
 redis_client = redis.Redis(
@@ -50,6 +52,12 @@ def _update_request(request_id: str, updates: dict[str, Any]) -> None:
     record.update(updates)
     record["updated_at"] = datetime.utcnow().isoformat()
     redis_client.hset(REQUESTS_KEY, request_id, json.dumps(record))
+    if is_supabase_enabled():
+        sync_request_to_supabase(record)
+
+
+def _truncate(value: Any, limit: int = 500) -> str:
+    return str(value)[:limit]
 
 
 def _get_parallel_limit() -> int:
@@ -156,7 +164,7 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
         )
 
         if webhook_url:
-            _fire_webhook(
+            webhook_result = _fire_webhook(
                 webhook_url,
                 {
                     "request_id": request_id,
@@ -165,6 +173,15 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
                     "response": response,
                 },
             )
+            if webhook_result:
+                _update_request(
+                    request_id,
+                    {
+                        "webhook_status": webhook_result.get("status"),
+                        "webhook_response_summary": _truncate(webhook_result.get("body")),
+                        "webhook_error": webhook_result.get("error"),
+                    },
+                )
 
         return {"status": "success", "request_id": request_id, "response": response}
 
@@ -182,7 +199,7 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
                     "retry_count": attempt + 1,
                 },
             )
-            _fire_webhook(
+            webhook_result = _fire_webhook(
                 webhook_url,
                 {
                     "request_id": request_id,
@@ -191,6 +208,15 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
                     "error": error_msg,
                 },
             )
+            if webhook_result:
+                _update_request(
+                    request_id,
+                    {
+                        "webhook_status": webhook_result.get("status"),
+                        "webhook_response_summary": _truncate(webhook_result.get("body")),
+                        "webhook_error": webhook_result.get("error"),
+                    },
+                )
             return {"status": "failed", "request_id": request_id, "error": error_msg}
 
         if attempt < max_ret:
@@ -213,7 +239,7 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
                 "retry_count": attempt + 1,
             },
         )
-        _fire_webhook(
+        webhook_result = _fire_webhook(
             webhook_url,
             {
                 "request_id": request_id,
@@ -222,27 +248,75 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
                 "error": error_msg,
             },
         )
+        if webhook_result:
+            _update_request(
+                request_id,
+                {
+                    "webhook_status": webhook_result.get("status"),
+                    "webhook_response_summary": _truncate(webhook_result.get("body")),
+                    "webhook_error": webhook_result.get("error"),
+                },
+            )
         return {"status": "failed", "request_id": request_id, "error": error_msg}
     finally:
         if slot_acquired:
             _release_slot()
 
 
-def _fire_webhook(webhook_url: Optional[str], body: dict[str, Any]) -> None:
+def _fire_webhook(webhook_url: Optional[str], body: dict[str, Any]) -> Optional[dict[str, Any]]:
     if not webhook_url:
-        return
+        return None
     try:
-        http_requests.post(webhook_url, json=body, timeout=10)
+        resp = http_requests.post(
+            webhook_url,
+            json=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/plain, */*"},
+            timeout=10,
+        )
+        parsed = _safe_json_or_text(resp)
+        error = None if resp.status_code < 400 else _truncate(parsed, 1000)
+        return {"status": resp.status_code, "body": parsed, "error": error}
     except Exception as exc:
         print(f"[WEBHOOK] Failed to call {webhook_url}: {exc}")
+        return {"status": None, "body": None, "error": str(exc)}
 
 
 def _safe_json_or_text(resp: http_requests.Response) -> dict[str, Any]:
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    content_bytes = resp.content or b""
     try:
         return resp.json()
     except Exception:
-        text = (resp.text or "").strip()
-        return {"raw": text[:1000], "status": resp.status_code}
+        pass
+
+    # Preserve non-text payloads (images/files/audio/etc.) via base64 envelope.
+    # Also detect binary by bytes because some services return wrong/missing content-type.
+    is_declared_textual = (
+        content_type.startswith("text/")
+        or "json" in content_type
+        or "xml" in content_type
+        or "javascript" in content_type
+        or "x-www-form-urlencoded" in content_type
+    )
+    looks_binary = (
+        b"\x00" in content_bytes
+        or any(
+            (b < 9) or (13 < b < 32)
+            for b in content_bytes[:2048]
+        )
+    )
+    if (not is_declared_textual) or looks_binary:
+        return {
+            "__binary__": True,
+            "status_code": resp.status_code,
+            "content_type": resp.headers.get("Content-Type") or "application/octet-stream",
+            "content_disposition": resp.headers.get("Content-Disposition"),
+            "body_base64": base64.b64encode(content_bytes).decode("ascii"),
+            "size_bytes": len(content_bytes),
+        }
+
+    text = (resp.text or "").strip()
+    return {"raw": text[:1000], "status": resp.status_code}
 
 
 def _send_to_comfyui(url: str, payload: Any, headers: dict[str, Any], timeout: int):
