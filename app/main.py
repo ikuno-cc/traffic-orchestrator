@@ -348,10 +348,12 @@ def update_service(service_id: str, service: ServiceConfig):
 def delete_service(service_id: str):
     if not _service_exists(service_id):
         raise HTTPException(404, "Service not found")
+    if is_supabase_enabled():
+        deleted = delete_service_from_supabase(service_id)
+        if not deleted:
+            raise HTTPException(502, "Failed to delete service from Supabase")
     redis_client.hdel(SERVICES_KEY, service_id)
     redis_client.srem(PAUSED_KEY, service_id)
-    if is_supabase_enabled():
-        delete_service_from_supabase(service_id)
     return {"deleted": service_id}
 
 
@@ -541,9 +543,11 @@ def cancel_request(request_id: str):
 
 @app.delete("/requests/{request_id}")
 def delete_request(request_id: str):
-    redis_client.hdel(REQUESTS_KEY, request_id)
     if is_supabase_enabled():
-        delete_request_from_supabase(request_id)
+        deleted = delete_request_from_supabase(request_id)
+        if not deleted:
+            raise HTTPException(502, "Failed to delete request from Supabase")
+    redis_client.hdel(REQUESTS_KEY, request_id)
     return {"deleted": request_id}
 
 

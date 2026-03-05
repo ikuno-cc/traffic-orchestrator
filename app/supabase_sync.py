@@ -148,9 +148,10 @@ def sync_service_to_supabase(service: dict[str, Any]) -> None:
         )
 
 
-def delete_service_from_supabase(service_id: str) -> None:
+def delete_service_from_supabase(service_id: str) -> bool:
     sid = quote_plus(service_id)
-    _request("DELETE", f"{SERVICES_TABLE}?id=eq.{sid}", headers=_headers())
+    resp = _request("DELETE", f"{SERVICES_TABLE}?id=eq.{sid}", headers=_headers(), allow_error=True)
+    return resp is not None and resp.status_code < 400
 
 
 def sync_request_to_supabase(record: dict[str, Any]) -> None:
@@ -215,6 +216,7 @@ def fetch_requests_from_supabase(
     return [_request_row_to_record(row) for row in resp.json()]
 
 
-def delete_request_from_supabase(request_id: str) -> None:
+def delete_request_from_supabase(request_id: str) -> bool:
     rid = quote_plus(request_id)
-    _request("DELETE", f"{REQUESTS_TABLE}?id=eq.{rid}", headers=_headers())
+    resp = _request("DELETE", f"{REQUESTS_TABLE}?id=eq.{rid}", headers=_headers(), allow_error=True)
+    return resp is not None and resp.status_code < 400
