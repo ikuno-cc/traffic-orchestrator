@@ -19,6 +19,7 @@ from app.supabase_sync import (
     delete_service_from_supabase,
     fetch_request_from_supabase,
     fetch_requests_from_supabase,
+    fetch_service_from_supabase,
     fetch_services_from_supabase,
     is_supabase_enabled,
     sync_request_to_supabase,
@@ -154,6 +155,8 @@ def _sync_celery_status(record: dict) -> dict:
 
 
 def _service_exists(service_id: str) -> bool:
+    if is_supabase_enabled():
+        return fetch_service_from_supabase(service_id) is not None
     _seed_services_from_supabase_if_needed()
     return bool(redis_client.hexists(SERVICES_KEY, service_id))
 
@@ -161,6 +164,17 @@ def _service_exists(service_id: str) -> bool:
 def _find_duplicate_service(
     url: str, service_type: str, exclude_id: Optional[str] = None
 ) -> Optional[dict]:
+    if is_supabase_enabled():
+        normalized_url = url.rstrip("/")
+        for item in fetch_services_from_supabase():
+            sid = item.get("id")
+            if exclude_id and sid == exclude_id:
+                continue
+            if item.get("type") == service_type and item.get("url", "").rstrip("/") == normalized_url:
+                item["paused"] = redis_client.sismember(PAUSED_KEY, sid)
+                return item
+        return None
+
     _seed_services_from_supabase_if_needed()
     all_services = redis_client.hgetall(SERVICES_KEY)
     normalized_url = url.rstrip("/")
@@ -224,6 +238,13 @@ def _worker_snapshot() -> dict:
 
 @app.get("/services")
 def list_services():
+    if is_supabase_enabled():
+        services = fetch_services_from_supabase()
+        paused = redis_client.smembers(PAUSED_KEY)
+        for service in services:
+            service["paused"] = service["id"] in paused
+        return services
+
     _seed_services_from_supabase_if_needed()
     raw = redis_client.hgetall(SERVICES_KEY)
     if not raw and is_supabase_enabled():
@@ -282,6 +303,13 @@ def create_service(service: ServiceConfig):
 
 @app.get("/services/{service_id}")
 def get_service(service_id: str):
+    if is_supabase_enabled():
+        service = fetch_service_from_supabase(service_id)
+        if not service:
+            raise HTTPException(404, "Service not found")
+        service["paused"] = redis_client.sismember(PAUSED_KEY, service_id)
+        return service
+
     _seed_services_from_supabase_if_needed()
     raw = redis_client.hget(SERVICES_KEY, service_id)
     if not raw:
@@ -293,16 +321,21 @@ def get_service(service_id: str):
 
 @app.put("/services/{service_id}")
 def update_service(service_id: str, service: ServiceConfig):
-    _seed_services_from_supabase_if_needed()
-    raw_existing = redis_client.hget(SERVICES_KEY, service_id)
-    if not raw_existing:
-        raise HTTPException(404, "Service not found")
-
     duplicate = _find_duplicate_service(service.url, service.type, exclude_id=service_id)
     if duplicate:
         raise HTTPException(409, "Service with the same URL and type already exists")
 
-    existing = json.loads(raw_existing)
+    if is_supabase_enabled():
+        existing = fetch_service_from_supabase(service_id)
+        if not existing:
+            raise HTTPException(404, "Service not found")
+    else:
+        _seed_services_from_supabase_if_needed()
+        raw_existing = redis_client.hget(SERVICES_KEY, service_id)
+        if not raw_existing:
+            raise HTTPException(404, "Service not found")
+        existing = json.loads(raw_existing)
+
     service.id = service_id
     service.created_at = existing.get("created_at", service.created_at)
     payload = service.model_dump()
@@ -348,12 +381,17 @@ def resume_service(service_id: str):
 
 @app.post("/dispatch")
 def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds: Optional[int] = None):
-    _seed_services_from_supabase_if_needed()
-    raw = redis_client.hget(SERVICES_KEY, req.service_id)
-    if not raw:
-        raise HTTPException(404, "Service not found")
-
-    service = json.loads(raw)
+    if is_supabase_enabled():
+        service = fetch_service_from_supabase(req.service_id)
+        if not service:
+            raise HTTPException(404, "Service not found")
+        redis_client.hset(SERVICES_KEY, req.service_id, json.dumps(service))
+    else:
+        _seed_services_from_supabase_if_needed()
+        raw = redis_client.hget(SERVICES_KEY, req.service_id)
+        if not raw:
+            raise HTTPException(404, "Service not found")
+        service = json.loads(raw)
     if not service.get("enabled", True):
         raise HTTPException(409, "Service is disabled")
     if service.get("type") not in {"comfyui", "n8n", "custom"}:
@@ -443,6 +481,10 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
 @app.get("/requests")
 def list_requests(service_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100):
     limit = max(1, min(limit, 1000))
+    if is_supabase_enabled():
+        records = fetch_requests_from_supabase(service_id=service_id, status=status, limit=limit)
+        return [_sync_celery_status(r) for r in records]
+
     raw = redis_client.hgetall(REQUESTS_KEY)
     if not raw and is_supabase_enabled():
         return fetch_requests_from_supabase(service_id=service_id, status=status, limit=limit)
@@ -461,6 +503,12 @@ def list_requests(service_id: Optional[str] = None, status: Optional[str] = None
 
 @app.get("/requests/{request_id}")
 def get_request(request_id: str):
+    if is_supabase_enabled():
+        record = fetch_request_from_supabase(request_id)
+        if not record:
+            raise HTTPException(404, "Request not found")
+        return _sync_celery_status(record)
+
     raw = redis_client.hget(REQUESTS_KEY, request_id)
     if not raw:
         if is_supabase_enabled():
@@ -501,12 +549,14 @@ def delete_request(request_id: str):
 
 @app.get("/stats")
 def stats():
-    raw = redis_client.hgetall(REQUESTS_KEY)
-    if not raw and is_supabase_enabled():
+    if is_supabase_enabled():
         synced = fetch_requests_from_supabase(limit=1000)
+        services_count = len(fetch_services_from_supabase())
     else:
+        raw = redis_client.hgetall(REQUESTS_KEY)
         records = [json.loads(v) for v in raw.values()]
         synced = [_sync_celery_status(r) for r in records]
+        services_count = redis_client.hlen(SERVICES_KEY)
 
     paused_services = list(redis_client.smembers(PAUSED_KEY))
     by_status = {}
@@ -520,7 +570,7 @@ def stats():
         "by_status": by_status,
         "by_service": by_service,
         "paused_services": paused_services,
-        "active_services": redis_client.hlen(SERVICES_KEY),
+        "active_services": services_count,
     }
 
 
@@ -539,9 +589,10 @@ def sink(payload: Any = Body(...)):
 
 
 def _get_paused_requests_for_service(service_id: str):
-    raw = redis_client.hgetall(REQUESTS_KEY)
-    if not raw and is_supabase_enabled():
+    if is_supabase_enabled():
         return fetch_requests_from_supabase(service_id=service_id, status="paused", limit=1000)
+
+    raw = redis_client.hgetall(REQUESTS_KEY)
     result = []
     for value in raw.values():
         record = json.loads(value)
