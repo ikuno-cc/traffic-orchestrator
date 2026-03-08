@@ -445,22 +445,76 @@ def _extract_comfyui_error_from_messages(messages: Any) -> Optional[str]:
 
 
 def _send_to_n8n(url: str, payload: Any, headers: dict[str, Any], timeout: int):
-    resp = http_requests.post(
-        url,
-        json=payload,
-        headers={"Content-Type": "application/json", **headers},
-        timeout=timeout,
-    )
+    multipart = _build_multipart_request(payload)
+    if multipart is not None:
+        form_data, files = multipart
+        req_headers = {k: v for k, v in (headers or {}).items() if k.lower() != "content-type"}
+        resp = http_requests.post(url, data=form_data, files=files, headers=req_headers, timeout=timeout)
+    else:
+        resp = http_requests.post(
+            url,
+            json=payload,
+            headers={"Content-Type": "application/json", **headers},
+            timeout=timeout,
+        )
     resp.raise_for_status()
     return _safe_json_or_text(resp)
 
 
 def _send_generic(url: str, payload: Any, headers: dict[str, Any], timeout: int):
-    resp = http_requests.post(
-        url,
-        json=payload,
-        headers={"Content-Type": "application/json", **headers},
-        timeout=timeout,
-    )
+    multipart = _build_multipart_request(payload)
+    if multipart is not None:
+        form_data, files = multipart
+        req_headers = {k: v for k, v in (headers or {}).items() if k.lower() != "content-type"}
+        resp = http_requests.post(url, data=form_data, files=files, headers=req_headers, timeout=timeout)
+    else:
+        resp = http_requests.post(
+            url,
+            json=payload,
+            headers={"Content-Type": "application/json", **headers},
+            timeout=timeout,
+        )
     resp.raise_for_status()
     return _safe_json_or_text(resp)
+
+
+def _build_multipart_request(payload: Any) -> Optional[tuple[dict[str, str], dict[str, tuple[str, bytes, str]]]]:
+    """
+    Opt-in multipart shape:
+    {
+      "multipart": {
+        "field_name": "file",
+        "filename": "clip.mp4",
+        "content_type": "video/mp4",
+        "file_base64": "<base64>"
+      },
+      "form": {"key": "value"}  # optional
+    }
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    mp = payload.get("multipart")
+    if not isinstance(mp, dict):
+        return None
+
+    file_base64 = mp.get("file_base64")
+    if not isinstance(file_base64, str) or not file_base64.strip():
+        raise NonRetryableDispatchError("multipart.file_base64 is required for multipart requests")
+
+    try:
+        file_bytes = base64.b64decode(file_base64, validate=True)
+    except Exception as exc:
+        raise NonRetryableDispatchError(f"Invalid multipart.file_base64: {exc}") from exc
+
+    field_name = str(mp.get("field_name") or "file")
+    filename = str(mp.get("filename") or "upload.bin")
+    content_type = str(mp.get("content_type") or "application/octet-stream")
+
+    raw_form = payload.get("form") or {}
+    if not isinstance(raw_form, dict):
+        raise NonRetryableDispatchError("form must be an object for multipart requests")
+    form_data = {str(k): ("" if v is None else str(v)) for k, v in raw_form.items()}
+
+    files = {field_name: (filename, file_bytes, content_type)}
+    return form_data, files
