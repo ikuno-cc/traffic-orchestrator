@@ -182,8 +182,14 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
                         "webhook_error": webhook_result.get("error"),
                     },
                 )
-
-        return {"status": "success", "request_id": request_id, "response": response}
+        return {
+            "status": "success",
+            "request_id": request_id,
+            "response": response,
+            "webhook_response": webhook_result.get("body") if webhook_url and webhook_result else None,
+            "webhook_status": webhook_result.get("status") if webhook_url and webhook_result else None,
+            "webhook_error": webhook_result.get("error") if webhook_url and webhook_result else None,
+        }
 
     except Exception as exc:
         error_msg = str(exc)
@@ -217,7 +223,14 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
                         "webhook_error": webhook_result.get("error"),
                     },
                 )
-            return {"status": "failed", "request_id": request_id, "error": error_msg}
+            return {
+                "status": "failed",
+                "request_id": request_id,
+                "error": error_msg,
+                "webhook_response": webhook_result.get("body") if webhook_result else None,
+                "webhook_status": webhook_result.get("status") if webhook_result else None,
+                "webhook_error": webhook_result.get("error") if webhook_result else None,
+            }
 
         if attempt < max_ret:
             countdown = 5 * (2 ** attempt)
@@ -257,7 +270,14 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
                     "webhook_error": webhook_result.get("error"),
                 },
             )
-        return {"status": "failed", "request_id": request_id, "error": error_msg}
+        return {
+            "status": "failed",
+            "request_id": request_id,
+            "error": error_msg,
+            "webhook_response": webhook_result.get("body") if webhook_result else None,
+            "webhook_status": webhook_result.get("status") if webhook_result else None,
+            "webhook_error": webhook_result.get("error") if webhook_result else None,
+        }
     finally:
         if slot_acquired:
             _release_slot()

@@ -443,7 +443,12 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
             try:
                 task_result = task.get(timeout=wait_timeout)
                 if isinstance(task_result, dict):
-                    response_payload = task_result.get("response")
+                    webhook_response_payload = task_result.get("webhook_response")
+                    response_payload = (
+                        webhook_response_payload
+                        if webhook_response_payload is not None
+                        else task_result.get("response")
+                    )
                     if (
                         task_result.get("status", "success") == "success"
                         and isinstance(response_payload, dict)
@@ -464,6 +469,9 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
                         "request_id": request_id,
                         "status": task_result.get("status", "success"),
                         "response": response_payload,
+                        "service_response": task_result.get("response"),
+                        "webhook_status": task_result.get("webhook_status"),
+                        "webhook_error": task_result.get("webhook_error"),
                         "error": task_result.get("error"),
                     }
                 return {"request_id": request_id, "status": "success", "response": task_result}
