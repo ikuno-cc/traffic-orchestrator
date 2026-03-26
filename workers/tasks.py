@@ -356,6 +356,7 @@ def _send_to_comfyui(url: str, payload: Any, headers: dict[str, Any], timeout: i
             raise NonRetryableDispatchError(message)
         raise RuntimeError(message)
     queued = _safe_json_or_text(resp)
+    _raise_if_logical_failure(queued, "ComfyUI enqueue")
     prompt_id = _extract_prompt_id(queued)
     if not prompt_id:
         raise RuntimeError(f"ComfyUI enqueue response missing prompt_id: {queued}")
@@ -365,6 +366,10 @@ def _send_to_comfyui(url: str, payload: Any, headers: dict[str, Any], timeout: i
     if status_str not in {"success", "succeeded"}:
         detail = error_msg or f"ComfyUI execution ended with status '{status_str}'"
         raise NonRetryableDispatchError(f"ComfyUI prompt {prompt_id} failed: {detail}")
+
+    # Some ComfyUI stacks can still include node_errors with HTTP 200.
+    if _contains_node_errors(queued) or _contains_node_errors(history_entry):
+        raise NonRetryableDispatchError(f"ComfyUI prompt {prompt_id} returned node_errors")
 
     return {
         "prompt_id": prompt_id,
@@ -478,7 +483,9 @@ def _send_to_n8n(url: str, payload: Any, headers: dict[str, Any], timeout: int):
             timeout=timeout,
         )
     resp.raise_for_status()
-    return _safe_json_or_text(resp)
+    parsed = _safe_json_or_text(resp)
+    _raise_if_logical_failure(parsed, "n8n")
+    return parsed
 
 
 def _send_generic(url: str, payload: Any, headers: dict[str, Any], timeout: int):
@@ -495,7 +502,28 @@ def _send_generic(url: str, payload: Any, headers: dict[str, Any], timeout: int)
             timeout=timeout,
         )
     resp.raise_for_status()
-    return _safe_json_or_text(resp)
+    parsed = _safe_json_or_text(resp)
+    _raise_if_logical_failure(parsed, "service")
+    return parsed
+
+
+def _contains_node_errors(body: Any) -> bool:
+    if not isinstance(body, dict):
+        return False
+    node_errors = body.get("node_errors")
+    return isinstance(node_errors, dict) and len(node_errors) > 0
+
+
+def _raise_if_logical_failure(body: Any, source: str) -> None:
+    if not isinstance(body, dict):
+        return
+
+    status_value = body.get("status")
+    if isinstance(status_value, str) and status_value.strip().lower() in {"failed", "failure", "error"}:
+        raise NonRetryableDispatchError(f"{source} returned logical failure: {body}")
+
+    if _contains_node_errors(body):
+        raise NonRetryableDispatchError(f"{source} returned node_errors: {body}")
 
 
 def _build_multipart_request(payload: Any) -> Optional[tuple[dict[str, str], dict[str, tuple[str, bytes, str]]]]:
