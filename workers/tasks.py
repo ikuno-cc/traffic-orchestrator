@@ -5,6 +5,7 @@ import time
 import base64
 from datetime import datetime
 from typing import Any, Optional
+from urllib.parse import unquote
 
 import redis
 import requests as http_requests
@@ -344,6 +345,7 @@ def _send_to_comfyui(url: str, payload: Any, headers: dict[str, Any], timeout: i
     endpoint = base_url + "/prompt"
     body = _normalize_comfyui_payload(payload)
     body = _sanitize_comfyui_payload(body)
+    _validate_comfyui_required_inputs(body)
     resp = http_requests.post(
         endpoint,
         json=body,
@@ -409,12 +411,22 @@ def _sanitize_comfyui_payload(body: dict[str, Any]) -> dict[str, Any]:
     for _node_id, node in prompt.items():
         if not isinstance(node, dict):
             continue
+        class_type = str(node.get("class_type") or "")
         inputs = node.get("inputs")
         if not isinstance(inputs, dict):
             continue
 
         for key in list(inputs.keys()):
             value = inputs.get(key)
+
+            if isinstance(value, str):
+                # n8n sometimes sends URL-encoded filenames (e.g. %20 for spaces).
+                # ComfyUI file-loader nodes usually expect the raw filename.
+                if _looks_like_file_field(class_type, key):
+                    decoded = unquote(value).strip()
+                    inputs[key] = decoded
+                    value = decoded
+
             if value is not None:
                 continue
 
@@ -430,6 +442,44 @@ def _sanitize_comfyui_payload(body: dict[str, Any]) -> dict[str, Any]:
                 inputs.pop(key, None)
 
     return body
+
+
+def _looks_like_file_field(class_type: str, key: Any) -> bool:
+    key_lower = str(key).lower()
+    class_lower = class_type.lower()
+    if key_lower in {"image", "audio", "video", "file", "filename", "path", "url"}:
+        return True
+    if "load" in class_lower and key_lower in {"image", "audio", "video"}:
+        return True
+    return False
+
+
+def _validate_comfyui_required_inputs(body: dict[str, Any]) -> None:
+    prompt = body.get("prompt")
+    if not isinstance(prompt, dict):
+        return
+
+    required_loader_fields = {
+        "LoadImage": "image",
+        "VHS_LoadAudioUpload": "audio",
+        "LoadAudio": "audio",
+    }
+    failures: list[str] = []
+
+    for node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or "")
+        required_field = required_loader_fields.get(class_type)
+        if not required_field:
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        raw_value = inputs.get(required_field)
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            failures.append(f"node {node_id} ({class_type}) missing required '{required_field}' input")
+
+    if failures:
+        raise NonRetryableDispatchError("; ".join(failures))
 
 
 def _extract_prompt_id(response_body: Any) -> Optional[str]:
