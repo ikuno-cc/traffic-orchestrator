@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 import base64
+import time
 from typing import Any, Literal, Optional
 
 import redis
@@ -60,6 +61,9 @@ PAUSED_KEY = "orchestrator:paused_services"
 REQUESTS_KEY = "orchestrator:requests"
 WORKER_LIMIT_KEY = "orchestrator:worker_limit"
 RUNNING_SLOTS_KEY = "orchestrator:running_slots"
+SUPABASE_RECONCILE_SECONDS = max(1, int(os.getenv("SUPABASE_RECONCILE_SECONDS", "5")))
+_last_service_reconcile_at = 0.0
+_last_request_reconcile_at = 0.0
 
 CELERY_STATE_MAP = {
     "PENDING": "queued",
@@ -97,6 +101,38 @@ def _seed_requests_from_supabase_if_needed(limit: int = 1000) -> None:
         return
     for record in fetch_requests_from_supabase(limit=limit):
         redis_client.hset(REQUESTS_KEY, record["id"], json.dumps(record))
+
+
+def _reconcile_services_from_supabase(limit: int = 1000) -> None:
+    global _last_service_reconcile_at
+    if not is_supabase_enabled():
+        return
+    now = time.time()
+    if now - _last_service_reconcile_at < SUPABASE_RECONCILE_SECONDS:
+        return
+    _last_service_reconcile_at = now
+    for service in fetch_services_from_supabase()[:limit]:
+        sid = service.get("id")
+        if not sid:
+            continue
+        if not redis_client.hexists(SERVICES_KEY, sid):
+            redis_client.hset(SERVICES_KEY, sid, json.dumps(service))
+
+
+def _reconcile_requests_from_supabase(limit: int = 1000) -> None:
+    global _last_request_reconcile_at
+    if not is_supabase_enabled():
+        return
+    now = time.time()
+    if now - _last_request_reconcile_at < SUPABASE_RECONCILE_SECONDS:
+        return
+    _last_request_reconcile_at = now
+    for record in fetch_requests_from_supabase(limit=limit):
+        rid = record.get("id")
+        if not rid:
+            continue
+        if not redis_client.hexists(REQUESTS_KEY, rid):
+            redis_client.hset(REQUESTS_KEY, rid, json.dumps(record))
 
 
 class ServiceConfig(BaseModel):
@@ -239,6 +275,7 @@ def _worker_snapshot() -> dict:
 @app.get("/services")
 def list_services():
     _seed_services_from_supabase_if_needed()
+    _reconcile_services_from_supabase(limit=1000)
     raw = redis_client.hgetall(SERVICES_KEY)
     services = [json.loads(v) for v in raw.values()]
     paused = redis_client.smembers(PAUSED_KEY)
@@ -370,6 +407,7 @@ def resume_service(service_id: str):
 @app.post("/dispatch")
 def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds: Optional[int] = None):
     _seed_services_from_supabase_if_needed()
+    _reconcile_services_from_supabase(limit=1000)
     raw = redis_client.hget(SERVICES_KEY, req.service_id)
     if not raw and is_supabase_enabled():
         service_from_supabase = fetch_service_from_supabase(req.service_id)
@@ -477,23 +515,25 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
 def list_requests(service_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100):
     limit = max(1, min(limit, 1000))
     _seed_requests_from_supabase_if_needed(limit=1000)
+    _reconcile_requests_from_supabase(limit=1000)
     raw = redis_client.hgetall(REQUESTS_KEY)
     records = [json.loads(v) for v in raw.values()]
 
     if service_id:
         records = [r for r in records if r.get("service_id") == service_id]
+    if status:
+        records = [r for r in records if r.get("status") == status]
 
     records.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     # Only sync Celery status for the page we are about to return to keep polling fast.
     page = records[:limit]
     page = [_sync_celery_status(r) for r in page]
-    if status:
-        page = [r for r in page if r.get("status") == status]
     return page
 
 
 @app.get("/requests/{request_id}")
 def get_request(request_id: str):
+    _reconcile_requests_from_supabase(limit=1000)
     raw = redis_client.hget(REQUESTS_KEY, request_id)
     if not raw and is_supabase_enabled():
         record = fetch_request_from_supabase(request_id)
@@ -549,6 +589,8 @@ def delete_request(request_id: str):
 def stats():
     _seed_services_from_supabase_if_needed()
     _seed_requests_from_supabase_if_needed(limit=1000)
+    _reconcile_services_from_supabase(limit=1000)
+    _reconcile_requests_from_supabase(limit=1000)
     raw = redis_client.hgetall(REQUESTS_KEY)
     records = [json.loads(v) for v in raw.values()]
     services_count = redis_client.hlen(SERVICES_KEY)
@@ -571,7 +613,11 @@ def stats():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+    return {
+        "status": "ok",
+        "time": datetime.utcnow().isoformat(),
+        "supabase_enabled": is_supabase_enabled(),
+    }
 
 
 @app.post("/sink")

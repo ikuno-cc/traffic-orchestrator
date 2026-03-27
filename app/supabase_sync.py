@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any, Optional
 from urllib.parse import quote_plus
@@ -32,16 +33,24 @@ def _headers(write: bool = False) -> dict[str, str]:
 def _request(method: str, path: str, allow_error: bool = False, **kwargs):
     if not is_supabase_enabled():
         return None
-    try:
-        resp = requests.request(method, f"{BASE_URL}/rest/v1/{path}", timeout=15, **kwargs)
-        if resp.status_code >= 400:
-            print(f"[SUPABASE] {method} {path} failed {resp.status_code}: {resp.text[:500]}")
-            if not allow_error:
-                return None
-        return resp
-    except Exception as exc:
-        print(f"[SUPABASE] Operation failed: {exc}")
-        return None
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.request(method, f"{BASE_URL}/rest/v1/{path}", timeout=15, **kwargs)
+            if resp.status_code >= 400:
+                print(f"[SUPABASE] {method} {path} failed {resp.status_code}: {resp.text[:500]}")
+                if resp.status_code >= 500 and attempt < attempts:
+                    time.sleep(0.4 * attempt)
+                    continue
+                if not allow_error:
+                    return None
+            return resp
+        except Exception as exc:
+            if attempt < attempts:
+                time.sleep(0.4 * attempt)
+                continue
+            print(f"[SUPABASE] Operation failed: {exc}")
+            return None
 
 
 def _request_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
