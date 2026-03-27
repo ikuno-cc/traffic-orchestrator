@@ -343,6 +343,7 @@ def _send_to_comfyui(url: str, payload: Any, headers: dict[str, Any], timeout: i
     base_url = url.rstrip("/")
     endpoint = base_url + "/prompt"
     body = _normalize_comfyui_payload(payload)
+    body = _sanitize_comfyui_payload(body)
     resp = http_requests.post(
         endpoint,
         json=body,
@@ -393,6 +394,42 @@ def _normalize_comfyui_payload(payload: Any) -> dict[str, Any]:
                 body["extra_data"] = extra_data
             return body
     return {"prompt": payload}
+
+
+def _sanitize_comfyui_payload(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    ComfyUI (and custom nodes) may crash on null text/file inputs with
+    errors like: "'NoneType' object has no attribute 'encode'".
+    We normalize likely string inputs to empty string and drop other null keys.
+    """
+    prompt = body.get("prompt")
+    if not isinstance(prompt, dict):
+        return body
+
+    for _node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+
+        for key in list(inputs.keys()):
+            value = inputs.get(key)
+            if value is not None:
+                continue
+
+            key_lower = str(key).lower()
+            if (
+                "text" in key_lower
+                or "prompt" in key_lower
+                or "filename" in key_lower
+                or key_lower in {"image", "audio", "video", "path", "url", "file"}
+            ):
+                inputs[key] = ""
+            else:
+                inputs.pop(key, None)
+
+    return body
 
 
 def _extract_prompt_id(response_body: Any) -> Optional[str]:
