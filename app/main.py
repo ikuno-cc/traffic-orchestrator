@@ -480,15 +480,16 @@ def list_requests(service_id: Optional[str] = None, status: Optional[str] = None
     raw = redis_client.hgetall(REQUESTS_KEY)
     records = [json.loads(v) for v in raw.values()]
 
-    records = [_sync_celery_status(r) for r in records]
-
     if service_id:
         records = [r for r in records if r.get("service_id") == service_id]
-    if status:
-        records = [r for r in records if r.get("status") == status]
 
     records.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return records[:limit]
+    # Only sync Celery status for the page we are about to return to keep polling fast.
+    page = records[:limit]
+    page = [_sync_celery_status(r) for r in page]
+    if status:
+        page = [r for r in page if r.get("status") == status]
+    return page
 
 
 @app.get("/requests/{request_id}")
@@ -550,18 +551,17 @@ def stats():
     _seed_requests_from_supabase_if_needed(limit=1000)
     raw = redis_client.hgetall(REQUESTS_KEY)
     records = [json.loads(v) for v in raw.values()]
-    synced = [_sync_celery_status(r) for r in records]
     services_count = redis_client.hlen(SERVICES_KEY)
 
     paused_services = list(redis_client.smembers(PAUSED_KEY))
     by_status = {}
     by_service = {}
-    for record in synced:
+    for record in records:
         by_status[record["status"]] = by_status.get(record["status"], 0) + 1
         by_service[record["service_name"]] = by_service.get(record["service_name"], 0) + 1
 
     return {
-        "total_requests": len(synced),
+        "total_requests": len(records),
         "by_status": by_status,
         "by_service": by_service,
         "paused_services": paused_services,

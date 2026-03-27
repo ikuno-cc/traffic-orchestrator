@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api/client'
 import { parseApiDate } from '../utils/datetime'
 
-const POLL_MS = 4000
+const POLL_MS = 1500
+const FULL_POLL_MS = 10000
 
 function useStore() {
   const [services,  setServices]  = useState([])
@@ -13,7 +14,8 @@ function useStore() {
   const [loading,   setLoading]   = useState(true)
   const [lastPoll,  setLastPoll]  = useState(null)
   const [error,     setError]     = useState(null)
-  const pollRef = useRef(null)
+  const reqPollRef = useRef(null)
+  const fullPollRef = useRef(null)
 
   const fetchAll = useCallback(async (silent = false) => {
     try {
@@ -39,12 +41,26 @@ function useStore() {
     }
   }, [])
 
+  const fetchRequestsOnly = useCallback(async () => {
+    try {
+      const reqs = await api.requests.list()
+      setRequests(reqs)
+      setLastPoll(new Date())
+    } catch (e) {
+      setError(e.message)
+    }
+  }, [])
+
   // Initial load + polling
   useEffect(() => {
     fetchAll()
-    pollRef.current = setInterval(() => fetchAll(true), POLL_MS)
-    return () => clearInterval(pollRef.current)
-  }, [fetchAll])
+    reqPollRef.current = setInterval(() => fetchRequestsOnly(), POLL_MS)
+    fullPollRef.current = setInterval(() => fetchAll(true), FULL_POLL_MS)
+    return () => {
+      clearInterval(reqPollRef.current)
+      clearInterval(fullPollRef.current)
+    }
+  }, [fetchAll, fetchRequestsOnly])
 
   const refresh = useCallback(() => fetchAll(false), [fetchAll])
 
