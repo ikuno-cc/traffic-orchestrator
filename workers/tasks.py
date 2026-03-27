@@ -344,6 +344,7 @@ def _send_to_comfyui(url: str, payload: Any, headers: dict[str, Any], timeout: i
     base_url = url.rstrip("/")
     endpoint = base_url + "/prompt"
     body = _normalize_comfyui_payload(payload)
+    body = _normalize_comfyui_model_names(body)
     body = _sanitize_comfyui_payload(body)
     body = _apply_comfyui_workarounds(body)
     _validate_comfyui_required_inputs(body)
@@ -397,6 +398,48 @@ def _normalize_comfyui_payload(payload: Any) -> dict[str, Any]:
                 body["extra_data"] = extra_data
             return body
     return {"prompt": payload}
+
+
+def _normalize_comfyui_model_names(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normalize known checkpoint/text-encoder aliases used by external workflows
+    to model names available on the current ComfyUI instance.
+    """
+    prompt = body.get("prompt")
+    if not isinstance(prompt, dict):
+        return body
+
+    # Conservative remaps based on repeated production failures.
+    model_aliases = {
+        "ltx-2.3-22b-dev-fp8.safetensors": "ltx-2.3-22b-dev.safetensors",
+        "gemma_3_12B_it_fp4_mixed.safetensors": "gemma_3_12B_it_fp8_e4m3fn.safetensors",
+    }
+
+    target_fields_by_class = {
+        "CheckpointLoaderSimple": {"ckpt_name"},
+        "LTXVAudioVAELoader": {"ckpt_name"},
+        "LTXAVTextEncoderLoader": {"ckpt_name", "text_encoder"},
+    }
+
+    for _node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or "")
+        allowed_fields = target_fields_by_class.get(class_type)
+        if not allowed_fields:
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for field in allowed_fields:
+            value = inputs.get(field)
+            if not isinstance(value, str):
+                continue
+            remapped = model_aliases.get(value.strip())
+            if remapped:
+                inputs[field] = remapped
+
+    return body
 
 
 def _sanitize_comfyui_payload(body: dict[str, Any]) -> dict[str, Any]:
