@@ -493,7 +493,8 @@ def _apply_comfyui_workarounds(body: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(prompt, dict):
         return body
 
-    for _node_id, node in prompt.items():
+    preview_bypass_map: dict[str, tuple[str, int]] = {}
+    for node_id, node in prompt.items():
         if not isinstance(node, dict):
             continue
         if str(node.get("class_type") or "") != "LTX2SamplingPreviewOverride":
@@ -501,9 +502,37 @@ def _apply_comfyui_workarounds(body: dict[str, Any]) -> dict[str, Any]:
         inputs = node.get("inputs")
         if not isinstance(inputs, dict):
             continue
-        # Disable preview generation to avoid buggy callback in current KJNodes stack.
-        if "preview_rate" in inputs:
-            inputs["preview_rate"] = 0
+        model_link = inputs.get("model")
+        if (
+            isinstance(model_link, list)
+            and len(model_link) == 2
+            and isinstance(model_link[0], str)
+            and isinstance(model_link[1], int)
+        ):
+            preview_bypass_map[node_id] = (model_link[0], model_link[1])
+
+    if not preview_bypass_map:
+        return body
+
+    # Rewire every link that points to the preview node output to its input model.
+    for _node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for input_key, value in list(inputs.items()):
+            if not (isinstance(value, list) and len(value) == 2 and isinstance(value[0], str)):
+                continue
+            source_node = value[0]
+            if source_node not in preview_bypass_map:
+                continue
+            upstream_node, upstream_output = preview_bypass_map[source_node]
+            inputs[input_key] = [upstream_node, upstream_output]
+
+    # Remove the preview override nodes entirely to avoid executing buggy callback code.
+    for preview_node_id in preview_bypass_map.keys():
+        prompt.pop(preview_node_id, None)
 
     return body
 
