@@ -345,6 +345,7 @@ def _send_to_comfyui(url: str, payload: Any, headers: dict[str, Any], timeout: i
     endpoint = base_url + "/prompt"
     body = _normalize_comfyui_payload(payload)
     body = _sanitize_comfyui_payload(body)
+    body = _apply_comfyui_workarounds(body)
     _validate_comfyui_required_inputs(body)
     resp = http_requests.post(
         endpoint,
@@ -480,6 +481,31 @@ def _validate_comfyui_required_inputs(body: dict[str, Any]) -> None:
 
     if failures:
         raise NonRetryableDispatchError("; ".join(failures))
+
+
+def _apply_comfyui_workarounds(body: dict[str, Any]) -> dict[str, Any]:
+    """
+    Workaround for ComfyUI-KJNodes LTX preview callback crash:
+    'NoneType' object has no attribute 'encode'
+    in ltxv_nodes.py process_previews when preview is enabled.
+    """
+    prompt = body.get("prompt")
+    if not isinstance(prompt, dict):
+        return body
+
+    for _node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("class_type") or "") != "LTX2SamplingPreviewOverride":
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        # Disable preview generation to avoid buggy callback in current KJNodes stack.
+        if "preview_rate" in inputs:
+            inputs["preview_rate"] = 0
+
+    return body
 
 
 def _extract_prompt_id(response_body: Any) -> Optional[str]:
