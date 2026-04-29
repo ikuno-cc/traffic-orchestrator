@@ -15,7 +15,7 @@ celery_app.conf.update(
     result_serializer="json",
     accept_content=["json"],
     task_track_started=True,
-    task_acks_late=True,
+    task_acks_late=False,
     worker_prefetch_multiplier=1,
     task_queue_max_priority=10,
     task_default_priority=5,

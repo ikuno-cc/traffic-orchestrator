@@ -109,7 +109,7 @@ def _release_slot() -> None:
             pipe.reset()
 
 
-@celery_app.task(bind=True, name="workers.tasks.dispatch_task", max_retries=3)
+@celery_app.task(bind=True, name="workers.tasks.dispatch_task", max_retries=0)
 def dispatch_task(
     self,
     request_id: str,
