@@ -76,7 +76,7 @@ def _request_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
 def fetch_services_from_supabase() -> list[dict[str, Any]]:
     resp = _request(
         "GET",
-        f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,enabled,custom_header,created_at&order=created_at.desc",
+        f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,created_at&order=created_at.desc",
         headers=_headers(),
     )
     if resp is None:
@@ -95,6 +95,7 @@ def fetch_services_from_supabase() -> list[dict[str, Any]]:
                 "timeout": int(row.get("timeout") or 120),
                 "enabled": bool(row.get("enabled", True)),
                 "headers": row.get("custom_header") or {},
+                "delay_seconds": float(row.get("delay_seconds", 3) or 3),
                 "created_at": row.get("created_at"),
             }
         )
@@ -105,7 +106,7 @@ def fetch_service_from_supabase(service_id: str) -> Optional[dict[str, Any]]:
     sid = quote_plus(service_id)
     resp = _request(
         "GET",
-        f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,enabled,custom_header,created_at&id=eq.{sid}&limit=1",
+        f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,created_at&id=eq.{sid}&limit=1",
         headers=_headers(),
     )
     if resp is None:
@@ -123,6 +124,7 @@ def fetch_service_from_supabase(service_id: str) -> Optional[dict[str, Any]]:
         "timeout": int(row.get("timeout") or 120),
         "enabled": bool(row.get("enabled", True)),
         "headers": row.get("custom_header") or {},
+        "delay_seconds": float(row.get("delay_seconds", 3) or 3),
         "created_at": row.get("created_at"),
     }
 
@@ -135,6 +137,7 @@ def sync_service_to_supabase(service: dict[str, Any]) -> None:
         "endpoint": service.get("url"),
         "description": service.get("description") or "",
         "timeout": int(service.get("timeout", 120)),
+        "delay_seconds": float(service.get("delay_seconds", 3) or 3),
         "enabled": bool(service.get("enabled", True)),
         "custom_header": service.get("headers", {}),
         "created_at": service.get("created_at"),
@@ -146,6 +149,18 @@ def sync_service_to_supabase(service: dict[str, Any]) -> None:
         data=json.dumps([payload]),
         allow_error=True,
     )
+    if resp is not None and resp.status_code == 400 and "delay_seconds" in (resp.text or ""):
+        # Backward-compatible fallback for older schemas that do not yet have delay_seconds.
+        payload_compat = dict(payload)
+        payload_compat.pop("delay_seconds", None)
+        resp = _request(
+            "POST",
+            f"{SERVICES_TABLE}",
+            headers=_headers(write=True),
+            data=json.dumps([payload_compat]),
+            allow_error=True,
+        )
+
     if resp is not None and resp.status_code == 409:
         sid = quote_plus(str(service.get("id")))
         _request(
