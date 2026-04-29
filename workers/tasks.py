@@ -136,8 +136,8 @@ def dispatch_task(
     """Main dispatch task that routes payload to the target service."""
     scene_id, metadata = _request_context(request_id)
 
-        if redis_client.sismember(PAUSED_KEY, service_id):
-            _update_request(request_id, {"status": "paused"})
+    if redis_client.sismember(PAUSED_KEY, service_id):
+        _update_request(request_id, {"status": "paused"})
         return {"status": "paused", "request_id": request_id, "scene_id": scene_id, "metadata": metadata}
 
     raw = redis_client.hget(SERVICES_KEY, service_id)
