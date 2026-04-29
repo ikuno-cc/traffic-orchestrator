@@ -221,6 +221,8 @@ def dispatch_task(
             response = _send_to_comfyui(service_url, payload, headers, timeout)
         elif service_type == "n8n":
             response = _send_to_n8n(service_url, payload, headers, timeout)
+        elif service_type == "omnivoice":
+            response = _send_to_omnivoice(service_url, payload, headers, timeout)
         else:
             response = _send_generic(service_url, payload, headers, timeout)
 
@@ -771,6 +773,76 @@ def _send_to_n8n(url: str, payload: Any, headers: dict[str, Any], timeout: int):
     parsed = _safe_json_or_text(resp)
     _raise_if_logical_failure(parsed, "n8n")
     return parsed
+
+
+def _send_to_omnivoice(url: str, payload: Any, headers: dict[str, Any], timeout: int):
+    body = _normalize_omnivoice_payload(payload)
+    resp = http_requests.post(
+        url,
+        json=body,
+        headers={"Content-Type": "application/json", **headers},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    parsed = _safe_json_or_text(resp)
+    _raise_if_logical_failure(parsed, "omnivoice")
+    return parsed
+
+
+def _normalize_omnivoice_payload(payload: Any) -> dict[str, Any]:
+    """
+    Accept OmniVoice payload in either:
+    1) Raw Gradio format: {"data": [...]}
+    2) Friendly object format:
+       {
+         "text": "...",
+         "audio_url": "https://...",
+         "orig_name": "audio_sample.wav",     # optional
+         "speaker": "",                       # optional
+         "language": "",                      # optional
+         "max_tokens": 64,                    # optional
+         "temperature": 2,                    # optional
+         "top_p": true,                       # optional
+         "seed": 1,                           # optional
+         "style": null,                       # optional
+         "normalize": true,                   # optional
+         "enhance": true                      # optional
+       }
+    """
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        return payload
+
+    if not isinstance(payload, dict):
+        raise NonRetryableDispatchError("OmniVoice payload must be an object")
+
+    text = payload.get("text", "")
+    audio_url = payload.get(
+        "audio_url",
+        "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav",
+    )
+    orig_name = payload.get("orig_name", "audio_sample.wav")
+
+    if not isinstance(audio_url, str) or not audio_url.strip():
+        raise NonRetryableDispatchError("OmniVoice payload.audio_url must be a non-empty string")
+
+    data = [
+        text,
+        {
+            "meta": {"_type": "gradio.FileData"},
+            "orig_name": orig_name,
+            "url": audio_url,
+        },
+        payload.get("speaker", ""),
+        payload.get("language", ""),
+        payload.get("max_tokens", 64),
+        payload.get("temperature", 2),
+        payload.get("top_p", True),
+        payload.get("seed", 1),
+        payload.get("style", None),
+        payload.get("normalize", True),
+        payload.get("enhance", True),
+    ]
+    return {"data": data}
 
 
 def _send_generic(url: str, payload: Any, headers: dict[str, Any], timeout: int):

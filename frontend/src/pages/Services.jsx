@@ -6,6 +6,7 @@ const TYPE_COLORS = {
   comfyui: { bg: 'rgba(0,212,255,.1)',    color: 'var(--cyan)'    },
   n8n:     { bg: 'rgba(52,211,153,.1)',   color: 'var(--emerald)' },
   custom:  { bg: 'rgba(167,139,250,.1)',  color: 'var(--violet)'  },
+  omnivoice: { bg: 'rgba(251,146,60,.1)', color: 'var(--amber)'   },
 }
 
 function ServiceModal({ service, onClose, onSave, toast }) {
@@ -65,6 +66,7 @@ function ServiceModal({ service, onClose, onSave, toast }) {
             <select style={inputStyle} value={form.type} onChange={e => set('type', e.target.value)}>
               <option value="comfyui">ComfyUI</option>
               <option value="n8n">n8n</option>
+              <option value="omnivoice">OmniVoice</option>
               <option value="custom">Custom HTTP</option>
             </select>
           </Field>

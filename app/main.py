@@ -139,7 +139,7 @@ class ServiceConfig(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     url: str
-    type: Literal["comfyui", "n8n", "custom"]
+    type: Literal["comfyui", "n8n", "custom", "omnivoice"]
     description: Optional[str] = ""
     headers: dict = Field(default_factory=dict)
     timeout: int = Field(default=120, ge=1, le=3600)
@@ -420,7 +420,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
     service = json.loads(raw)
     if not service.get("enabled", True):
         raise HTTPException(409, "Service is disabled")
-    if service.get("type") not in {"comfyui", "n8n", "custom"}:
+    if service.get("type") not in {"comfyui", "n8n", "custom", "omnivoice"}:
         raise HTTPException(409, "Service type is invalid. Update or recreate this service.")
 
     is_paused = redis_client.sismember(PAUSED_KEY, req.service_id)
