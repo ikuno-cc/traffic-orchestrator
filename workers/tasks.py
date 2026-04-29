@@ -61,6 +61,42 @@ def _truncate(value: Any, limit: int = 500) -> str:
     return str(value)[:limit]
 
 
+def _extract_comfyui_artifacts(response: Any) -> list[dict[str, Any]]:
+    if not isinstance(response, dict):
+        return []
+    history = response.get("history")
+    if not isinstance(history, dict):
+        return []
+    outputs = history.get("outputs")
+    if not isinstance(outputs, dict):
+        return []
+
+    artifacts: list[dict[str, Any]] = []
+    media_keys = ("images", "gifs", "videos", "audio", "files")
+    for node_id, node_output in outputs.items():
+        if not isinstance(node_output, dict):
+            continue
+        for media_key in media_keys:
+            items = node_output.get(media_key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if not all(k in item for k in ("filename", "subfolder", "type")):
+                    continue
+                artifacts.append(
+                    {
+                        "node_id": str(node_id),
+                        "kind": media_key,
+                        "filename": item.get("filename"),
+                        "subfolder": item.get("subfolder"),
+                        "type": item.get("type"),
+                    }
+                )
+    return artifacts
+
+
 def _request_context(request_id: str) -> tuple[Optional[Any], dict[str, Any]]:
     raw = redis_client.hget(REQUESTS_KEY, request_id)
     if not raw:
@@ -198,6 +234,8 @@ def dispatch_task(
         )
 
         if webhook_url:
+            artifacts = _extract_comfyui_artifacts(response)
+            first_artifact = artifacts[0] if artifacts else None
             webhook_result = _fire_webhook(
                 webhook_url,
                 {
@@ -207,6 +245,9 @@ def dispatch_task(
                     "status": "success",
                     "service_id": service_id,
                     "response": response,
+                    "outputs": response.get("history", {}).get("outputs") if isinstance(response, dict) else None,
+                    "artifacts": artifacts,
+                    "artifact": first_artifact,
                 },
             )
             if webhook_result:
