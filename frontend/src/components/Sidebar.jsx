@@ -1,10 +1,10 @@
 ﻿import React from 'react'
 
 const NAV = [
-  { id: 'dashboard', label: 'Dashboard',  icon: 'â¬¡', section: 'Monitor' },
-  { id: 'requests',  label: 'Requests',   icon: 'â‡„', badge: 'active'    },
-  { id: 'services',  label: 'Services',   icon: 'â—ˆ', section: 'Config'  },
-  { id: 'dispatch',  label: 'Dispatch',   icon: 'â†—'                      },
+  { id: 'dashboard', label: 'Dashboard',  icon: '[]', section: 'Monitor' },
+  { id: 'requests',  label: 'Requests',   icon: '<>', badge: 'active'    },
+  { id: 'services',  label: 'Services',   icon: '*', section: 'Config'   },
+  { id: 'dispatch',  label: 'Dispatch',   icon: '->'                      },
 ]
 
 export default function Sidebar({ active, onChange, stats, requests }) {

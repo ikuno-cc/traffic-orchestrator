@@ -142,9 +142,9 @@ export default function Dispatch({ services, refresh, toast }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               <label style={labelStyle}>Target Service</label>
               <select value={serviceId} onChange={e => setServiceId(e.target.value)} style={inputStyle}>
-                <option value="">— select a service —</option>
+                <option value="">-- select a service --</option>
                 {services.map(s => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.type}){s.paused ? ' ⏸' : ''}</option>
+                  <option key={s.id} value={s.id}>{s.name} ({s.type}){s.paused ? ' [paused]' : ''}</option>
                 ))}
               </select>
             </div>
@@ -179,7 +179,7 @@ export default function Dispatch({ services, refresh, toast }) {
           <JsonEditor label="Routing Metadata (JSON)" value={metadata} onChange={setMetadata} minHeight={72} />
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-            <label style={labelStyle}>Webhook URL (optional — called on completion)</label>
+            <label style={labelStyle}>Webhook URL (optional - called on completion)</label>
             <input
               type="url" value={webhook} onChange={e => setWebhook(e.target.value)}
               placeholder="http://localhost:5678/webhook/done"
@@ -189,7 +189,7 @@ export default function Dispatch({ services, refresh, toast }) {
 
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <button onClick={handleDispatch} disabled={sending} style={{ ...btnPrimary, opacity: sending ? .6 : 1, minWidth: 120 }}>
-              {sending ? 'Sending…' : '↗ Dispatch'}
+              {sending ? 'Sending...' : '-> Dispatch'}
             </button>
             <button onClick={loadExample} style={btnGhost}>Load ComfyUI Example</button>
             <button onClick={() => { setPayload(''); setMetadata('{}'); setWebhook(''); setDelaySeconds('3'); setResult(null) }} style={{ ...btnGhost, marginLeft: 'auto', color: 'var(--text-3)' }}>
@@ -242,4 +242,5 @@ const inputStyle = {
 const btnBase    = { fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, cursor: 'pointer', borderRadius: 6, padding: '8px 16px', border: '1px solid transparent', transition: 'all .15s' }
 const btnPrimary = { ...btnBase, background: 'var(--cyan)', color: '#000' }
 const btnGhost   = { ...btnBase, background: 'transparent', border: '1px solid var(--border-2)', color: 'var(--text-2)' }
+
 
