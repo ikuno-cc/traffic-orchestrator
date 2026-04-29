@@ -407,7 +407,7 @@ def resume_service(service_id: str):
 
 
 @app.post("/dispatch")
-def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds: Optional[int] = None):
+def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_seconds: Optional[int] = None):
     _seed_services_from_supabase_if_needed()
     _reconcile_services_from_supabase(limit=1000)
     raw = redis_client.hget(SERVICES_KEY, req.service_id)
