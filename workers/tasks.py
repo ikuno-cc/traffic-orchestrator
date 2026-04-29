@@ -680,6 +680,7 @@ def _wait_for_comfyui_completion(
     endpoint = f"{base_url}/history/{prompt_id}"
     deadline = time.time() + max(1, timeout)
     last_success_entry: Optional[dict[str, Any]] = None
+    success_seen_at: Optional[float] = None
     poll_interval_seconds = 2.0
     request_headers = dict(headers or {})
 
@@ -697,8 +698,13 @@ def _wait_for_comfyui_completion(
                 return entry
             if status_str in {"success", "succeeded"}:
                 last_success_entry = entry
+                if success_seen_at is None:
+                    success_seen_at = time.time()
                 outputs = entry.get("outputs")
                 if isinstance(outputs, dict) and len(outputs) > 0:
+                    return entry
+                # Do not block for full timeout when ComfyUI reports success but omits outputs.
+                if success_seen_at is not None and (time.time() - success_seen_at) >= 60:
                     return entry
         time.sleep(poll_interval_seconds)
 
