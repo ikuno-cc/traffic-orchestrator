@@ -2,15 +2,13 @@ from datetime import datetime
 import json
 import os
 import uuid
-import base64
 import time
 from typing import Any, Literal, Optional
 
 import redis
 from celery.result import AsyncResult
-from celery.exceptions import TimeoutError as CeleryTimeoutError
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -425,15 +423,8 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         raise HTTPException(409, "Service type is invalid. Update or recreate this service.")
 
     is_paused = redis_client.sismember(PAUSED_KEY, req.service_id)
-    service_timeout = int(service.get("timeout", 120))
     service_delay = float(service.get("delay_seconds", 3))
     effective_delay = req.delay_seconds if req.delay_seconds is not None else service_delay
-    wait_timeout = (
-        max(1, min(timeout_seconds, 7200))
-        if timeout_seconds is not None
-        else max(1, min(service_timeout + 30, 7200))
-    )
-
     request_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat()
     status = "paused" if is_paused else "queued"
@@ -466,52 +457,6 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         record["celery_task_id"] = task.id
         redis_client.hset(REQUESTS_KEY, request_id, json.dumps(record))
         _persist_request(record)
-
-        if wait_for_result:
-            try:
-                task_result = task.get(timeout=wait_timeout)
-                if isinstance(task_result, dict):
-                    webhook_response_payload = task_result.get("webhook_response")
-                    response_payload = (
-                        webhook_response_payload
-                        if webhook_response_payload is not None
-                        else task_result.get("response")
-                    )
-                    if (
-                        task_result.get("status", "success") == "success"
-                        and isinstance(response_payload, dict)
-                        and response_payload.get("__binary__") is True
-                    ):
-                        raw_bytes = base64.b64decode(response_payload.get("body_base64") or "")
-                        headers = {}
-                        content_disposition = response_payload.get("content_disposition")
-                        if content_disposition:
-                            headers["Content-Disposition"] = content_disposition
-                        return Response(
-                            content=raw_bytes,
-                            media_type=response_payload.get("content_type") or "application/octet-stream",
-                            headers=headers,
-                            status_code=int(response_payload.get("status_code") or 200),
-                        )
-                    return {
-                        "request_id": request_id,
-                        "status": task_result.get("status", "success"),
-                        "response": response_payload,
-                        "service_response": task_result.get("response"),
-                        "webhook_status": task_result.get("webhook_status"),
-                        "webhook_error": task_result.get("webhook_error"),
-                        "error": task_result.get("error"),
-                    }
-                return {"request_id": request_id, "status": "success", "response": task_result}
-            except CeleryTimeoutError:
-                return JSONResponse(
-                    status_code=202,
-                    content={
-                        "request_id": request_id,
-                        "status": "queued",
-                        "error": f"Timed out waiting for service response after {wait_timeout}s",
-                    },
-                )
 
     return JSONResponse(status_code=202, content={"request_id": request_id, "status": status})
 
