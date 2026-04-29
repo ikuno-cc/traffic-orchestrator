@@ -604,6 +604,7 @@ def _wait_for_comfyui_completion(
 ) -> dict[str, Any]:
     endpoint = f"{base_url}/history/{prompt_id}"
     deadline = time.time() + max(1, timeout)
+    outputs_grace_deadline: Optional[float] = None
     poll_interval_seconds = 2.0
     request_headers = dict(headers or {})
 
@@ -617,8 +618,18 @@ def _wait_for_comfyui_completion(
         entry = _history_entry_for_prompt(body, prompt_id)
         if entry is not None:
             status_str, _ = _extract_comfyui_terminal_status(entry)
-            if status_str is not None:
+            if status_str in {"failed", "failure", "error"}:
                 return entry
+            if status_str in {"success", "succeeded"}:
+                outputs = entry.get("outputs")
+                if isinstance(outputs, dict) and len(outputs) > 0:
+                    return entry
+                # Some ComfyUI setups mark completed just before outputs are persisted.
+                # Keep polling briefly so filename/subfolder/type can appear in history.
+                if outputs_grace_deadline is None:
+                    outputs_grace_deadline = min(deadline, time.time() + 20)
+                elif time.time() >= outputs_grace_deadline:
+                    return entry
         time.sleep(poll_interval_seconds)
 
     raise RuntimeError(f"Timed out waiting for ComfyUI prompt {prompt_id} completion after {timeout}s")
