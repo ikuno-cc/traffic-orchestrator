@@ -83,7 +83,7 @@ function ResultCard({ result }) {
 export default function Dispatch({ services, refresh, toast }) {
   const [serviceId, setServiceId] = useState('')
   const [priority,  setPriority]  = useState('5')
-  const [delaySeconds, setDelaySeconds] = useState('3')
+  const [delaySeconds, setDelaySeconds] = useState('')
   const [payload,   setPayload]   = useState('')
   const [metadata,  setMetadata]  = useState('{}')
   const [webhook,   setWebhook]   = useState('')
@@ -106,7 +106,7 @@ export default function Dispatch({ services, refresh, toast }) {
         payload:     parsedPayload,
         metadata:    parsedMeta,
         priority:    parseInt(priority) || 5,
-        delay_seconds: Math.max(0, Number(delaySeconds) || 3),
+        delay_seconds: delaySeconds === '' ? null : Math.max(0, Number(delaySeconds) || 0),
         webhook_url: webhook || null,
       })
       setResult(r)
@@ -170,7 +170,7 @@ export default function Dispatch({ services, refresh, toast }) {
               step="0.1"
               value={delaySeconds}
               onChange={e => setDelaySeconds(e.target.value)}
-              placeholder="3"
+              placeholder="Service default (3s)"
               style={inputStyle}
             />
           </div>
@@ -192,7 +192,7 @@ export default function Dispatch({ services, refresh, toast }) {
               {sending ? 'Sending...' : '-> Dispatch'}
             </button>
             <button onClick={loadExample} style={btnGhost}>Load ComfyUI Example</button>
-            <button onClick={() => { setPayload(''); setMetadata('{}'); setWebhook(''); setDelaySeconds('3'); setResult(null) }} style={{ ...btnGhost, marginLeft: 'auto', color: 'var(--text-3)' }}>
+            <button onClick={() => { setPayload(''); setMetadata('{}'); setWebhook(''); setDelaySeconds(''); setResult(null) }} style={{ ...btnGhost, marginLeft: 'auto', color: 'var(--text-3)' }}>
               Clear
             </button>
           </div>

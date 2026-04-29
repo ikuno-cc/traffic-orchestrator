@@ -16,6 +16,7 @@ function ServiceModal({ service, onClose, onSave, toast }) {
     url:         service?.url         || '',
     description: service?.description || '',
     timeout:     service?.timeout     || 120,
+    delay_seconds: service?.delay_seconds ?? 3,
     enabled:     service?.enabled     ?? true,
     headers:     JSON.stringify(service?.headers || {}, null, 2),
   })
@@ -31,7 +32,12 @@ function ServiceModal({ service, onClose, onSave, toast }) {
 
     setSaving(true)
     try {
-      const data = { ...form, headers, timeout: parseInt(form.timeout) }
+      const data = {
+        ...form,
+        headers,
+        timeout: parseInt(form.timeout),
+        delay_seconds: Math.max(0, Number(form.delay_seconds) || 3),
+      }
       if (editing) await api.services.update(service.id, data)
       else         await api.services.create(data)
       toast(editing ? 'Service updated' : 'Service created', 'success')
@@ -72,9 +78,12 @@ function ServiceModal({ service, onClose, onSave, toast }) {
           <input style={inputStyle} value={form.description} onChange={e => set('description', e.target.value)} placeholder="Short description…" />
         </Field>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
           <Field label="Timeout (seconds)">
             <input style={inputStyle} type="number" value={form.timeout} onChange={e => set('timeout', e.target.value)} min={5} max={3600} />
+          </Field>
+          <Field label="Delay (seconds)">
+            <input style={inputStyle} type="number" value={form.delay_seconds} onChange={e => set('delay_seconds', e.target.value)} min={0} step="0.1" max={3600} />
           </Field>
           <Field label="Enabled">
             <select style={inputStyle} value={String(form.enabled)} onChange={e => set('enabled', e.target.value === 'true')}>
@@ -211,6 +220,10 @@ export default function Services({ services, serviceStats, refresh, toast }) {
                   <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <div style={{ fontSize: 10, color: 'var(--text-3)' }}>timeout</div>
                     <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{s.timeout}s</div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <div style={{ fontSize: 10, color: 'var(--text-3)' }}>delay</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{Number(s.delay_seconds ?? 3)}s</div>
                   </div>
                 </div>
 

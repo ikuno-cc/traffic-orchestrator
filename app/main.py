@@ -145,6 +145,7 @@ class ServiceConfig(BaseModel):
     description: Optional[str] = ""
     headers: dict = Field(default_factory=dict)
     timeout: int = Field(default=120, ge=1, le=3600)
+    delay_seconds: float = Field(default=3, ge=0, le=3600)
     enabled: bool = True
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
@@ -155,7 +156,7 @@ class DispatchRequest(BaseModel):
     metadata: dict = Field(default_factory=dict)
     priority: int = Field(default=5, ge=1, le=10)
     webhook_url: Optional[str] = None
-    delay_seconds: float = Field(default=3, ge=0, le=3600)
+    delay_seconds: Optional[float] = Field(default=None, ge=0, le=3600)
 
     @field_validator("webhook_url")
     @classmethod
@@ -425,6 +426,8 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
 
     is_paused = redis_client.sismember(PAUSED_KEY, req.service_id)
     service_timeout = int(service.get("timeout", 120))
+    service_delay = float(service.get("delay_seconds", 3))
+    effective_delay = req.delay_seconds if req.delay_seconds is not None else service_delay
     wait_timeout = (
         max(1, min(timeout_seconds, 7200))
         if timeout_seconds is not None
@@ -449,7 +452,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
         "priority": req.priority,
         "payload": req.payload,
         "webhook_url": req.webhook_url,
-        "delay_seconds": req.delay_seconds,
+        "delay_seconds": effective_delay,
     }
 
     redis_client.hset(REQUESTS_KEY, request_id, json.dumps(record))
@@ -457,7 +460,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
 
     if not is_paused:
         task = dispatch_task.apply_async(
-            args=[request_id, req.service_id, req.payload, req.webhook_url, req.delay_seconds],
+            args=[request_id, req.service_id, req.payload, req.webhook_url, effective_delay],
             priority=10 - req.priority,
         )
         record["celery_task_id"] = task.id
