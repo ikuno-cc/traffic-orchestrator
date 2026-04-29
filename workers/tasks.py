@@ -61,6 +61,21 @@ def _truncate(value: Any, limit: int = 500) -> str:
     return str(value)[:limit]
 
 
+def _request_context(request_id: str) -> tuple[Optional[Any], dict[str, Any]]:
+    raw = redis_client.hget(REQUESTS_KEY, request_id)
+    if not raw:
+        return None, {}
+    try:
+        record = json.loads(raw)
+    except Exception:
+        return None, {}
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    scene_id = record.get("scene_id")
+    if scene_id is None:
+        scene_id = metadata.get("scene_id")
+    return scene_id, metadata
+
+
 def _get_parallel_limit() -> int:
     raw = redis_client.get(WORKER_LIMIT_KEY)
     try:
@@ -119,15 +134,22 @@ def dispatch_task(
     delay_seconds: float = 3,
 ):
     """Main dispatch task that routes payload to the target service."""
+    scene_id, metadata = _request_context(request_id)
 
-    if redis_client.sismember(PAUSED_KEY, service_id):
-        _update_request(request_id, {"status": "paused"})
-        return {"status": "paused", "request_id": request_id}
+        if redis_client.sismember(PAUSED_KEY, service_id):
+            _update_request(request_id, {"status": "paused"})
+        return {"status": "paused", "request_id": request_id, "scene_id": scene_id, "metadata": metadata}
 
     raw = redis_client.hget(SERVICES_KEY, service_id)
     if not raw:
         _update_request(request_id, {"status": "failed", "error": "Service not found"})
-        return {"status": "failed", "request_id": request_id, "error": "Service not found"}
+        return {
+            "status": "failed",
+            "request_id": request_id,
+            "scene_id": scene_id,
+            "metadata": metadata,
+            "error": "Service not found",
+        }
 
     service = json.loads(raw)
     service_url = _resolve_url(service.get("url"))
@@ -180,6 +202,8 @@ def dispatch_task(
                 webhook_url,
                 {
                     "request_id": request_id,
+                    "scene_id": scene_id,
+                    "metadata": metadata,
                     "status": "success",
                     "service_id": service_id,
                     "response": response,
@@ -197,6 +221,8 @@ def dispatch_task(
         return {
             "status": "success",
             "request_id": request_id,
+            "scene_id": scene_id,
+            "metadata": metadata,
             "response": response,
             "webhook_response": webhook_result.get("body") if webhook_url and webhook_result else None,
             "webhook_status": webhook_result.get("status") if webhook_url and webhook_result else None,
@@ -221,6 +247,8 @@ def dispatch_task(
                 webhook_url,
                 {
                     "request_id": request_id,
+                    "scene_id": scene_id,
+                    "metadata": metadata,
                     "status": "failed",
                     "service_id": service_id,
                     "error": error_msg,
@@ -238,6 +266,8 @@ def dispatch_task(
             return {
                 "status": "failed",
                 "request_id": request_id,
+                "scene_id": scene_id,
+                "metadata": metadata,
                 "error": error_msg,
                 "webhook_response": webhook_result.get("body") if webhook_result else None,
                 "webhook_status": webhook_result.get("status") if webhook_result else None,
@@ -268,6 +298,8 @@ def dispatch_task(
             webhook_url,
             {
                 "request_id": request_id,
+                "scene_id": scene_id,
+                "metadata": metadata,
                 "status": "failed",
                 "service_id": service_id,
                 "error": error_msg,
@@ -285,6 +317,8 @@ def dispatch_task(
         return {
             "status": "failed",
             "request_id": request_id,
+            "scene_id": scene_id,
+            "metadata": metadata,
             "error": error_msg,
             "webhook_response": webhook_result.get("body") if webhook_result else None,
             "webhook_status": webhook_result.get("status") if webhook_result else None,

@@ -152,6 +152,7 @@ class DispatchRequest(BaseModel):
     payload: Any
     service_id: str
     metadata: dict = Field(default_factory=dict)
+    scene_id: Optional[Any] = None
     priority: int = Field(default=5, ge=1, le=10)
     webhook_url: Optional[str] = None
     delay_seconds: Optional[float] = Field(default=None, ge=0, le=3600)
@@ -440,6 +441,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         "error": None,
         "retry_count": 0,
         "metadata": req.metadata,
+        "scene_id": req.scene_id if req.scene_id is not None else req.metadata.get("scene_id"),
         "priority": req.priority,
         "payload": req.payload,
         "webhook_url": req.webhook_url,
@@ -458,7 +460,10 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         redis_client.hset(REQUESTS_KEY, request_id, json.dumps(record))
         _persist_request(record)
 
-    return JSONResponse(status_code=202, content={"request_id": request_id, "status": status})
+    return JSONResponse(
+        status_code=202,
+        content={"request_id": request_id, "status": status, "scene_id": record.get("scene_id")},
+    )
 
 
 @app.get("/requests")
