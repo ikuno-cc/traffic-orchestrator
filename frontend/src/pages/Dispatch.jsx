@@ -38,6 +38,9 @@ function JsonEditor({ value, onChange, label, minHeight = 120 }) {
 
 function ResultCard({ result }) {
   if (!result) return null
+  const hasResponse = result.response !== undefined && result.response !== null
+  const hasError = result.error !== undefined && result.error !== null
+
   return (
     <div style={{
       background: 'var(--bg-3)', border: '1px solid var(--border-2)',
@@ -55,15 +58,32 @@ function ResultCard({ result }) {
         <StatusBadge status={result.status} />
       </div>
       <div style={{ fontSize: 10, color: 'var(--text-2)' }}>
-        {result.status === 'queued' ? '→ Worker will pick this up shortly.' : '→ Service is paused — request held until resumed.'}
+        {result.status === 'queued'
+          ? 'Worker will pick this up shortly.'
+          : 'Service is paused or completed.'}
       </div>
+      {hasResponse && (
+        <div>
+          <div style={{ fontSize: 9, color: 'var(--text-3)', letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 4 }}>
+            Response
+          </div>
+          <pre style={{
+            margin: 0, fontSize: 10, lineHeight: 1.5, color: 'var(--text-1)',
+            background: 'var(--bg-1)', border: '1px solid var(--border-2)',
+            borderRadius: 6, padding: 10, maxHeight: 220, overflow: 'auto',
+          }}>
+            {JSON.stringify(result.response, null, 2)}
+          </pre>
+        </div>
+      )}
+      {hasError && <div style={{ fontSize: 10, color: 'var(--rose)' }}>{String(result.error)}</div>}
     </div>
   )
 }
-
 export default function Dispatch({ services, refresh, toast }) {
   const [serviceId, setServiceId] = useState('')
   const [priority,  setPriority]  = useState('5')
+  const [delaySeconds, setDelaySeconds] = useState('3')
   const [payload,   setPayload]   = useState('')
   const [metadata,  setMetadata]  = useState('{}')
   const [webhook,   setWebhook]   = useState('')
@@ -86,6 +106,7 @@ export default function Dispatch({ services, refresh, toast }) {
         payload:     parsedPayload,
         metadata:    parsedMeta,
         priority:    parseInt(priority) || 5,
+        delay_seconds: Math.max(0, Number(delaySeconds) || 3),
         webhook_url: webhook || null,
       })
       setResult(r)
@@ -141,6 +162,18 @@ export default function Dispatch({ services, refresh, toast }) {
               </div>
             </div>
           </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <label style={labelStyle}>Delay Between Requests (seconds)</label>
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              value={delaySeconds}
+              onChange={e => setDelaySeconds(e.target.value)}
+              placeholder="3"
+              style={inputStyle}
+            />
+          </div>
 
           <JsonEditor label="Payload (JSON)" value={payload} onChange={setPayload} minHeight={200} />
           <JsonEditor label="Routing Metadata (JSON)" value={metadata} onChange={setMetadata} minHeight={72} />
@@ -159,7 +192,7 @@ export default function Dispatch({ services, refresh, toast }) {
               {sending ? 'Sending…' : '↗ Dispatch'}
             </button>
             <button onClick={loadExample} style={btnGhost}>Load ComfyUI Example</button>
-            <button onClick={() => { setPayload(''); setMetadata('{}'); setWebhook(''); setResult(null) }} style={{ ...btnGhost, marginLeft: 'auto', color: 'var(--text-3)' }}>
+            <button onClick={() => { setPayload(''); setMetadata('{}'); setWebhook(''); setDelaySeconds('3'); setResult(null) }} style={{ ...btnGhost, marginLeft: 'auto', color: 'var(--text-3)' }}>
               Clear
             </button>
           </div>
@@ -209,3 +242,4 @@ const inputStyle = {
 const btnBase    = { fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, cursor: 'pointer', borderRadius: 6, padding: '8px 16px', border: '1px solid transparent', transition: 'all .15s' }
 const btnPrimary = { ...btnBase, background: 'var(--cyan)', color: '#000' }
 const btnGhost   = { ...btnBase, background: 'transparent', border: '1px solid var(--border-2)', color: 'var(--text-2)' }
+

@@ -155,6 +155,7 @@ class DispatchRequest(BaseModel):
     metadata: dict = Field(default_factory=dict)
     priority: int = Field(default=5, ge=1, le=10)
     webhook_url: Optional[str] = None
+    delay_seconds: float = Field(default=3, ge=0, le=3600)
 
     @field_validator("webhook_url")
     @classmethod
@@ -448,6 +449,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
         "priority": req.priority,
         "payload": req.payload,
         "webhook_url": req.webhook_url,
+        "delay_seconds": req.delay_seconds,
     }
 
     redis_client.hset(REQUESTS_KEY, request_id, json.dumps(record))
@@ -455,7 +457,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = True, timeout_seconds
 
     if not is_paused:
         task = dispatch_task.apply_async(
-            args=[request_id, req.service_id, req.payload, req.webhook_url],
+            args=[request_id, req.service_id, req.payload, req.webhook_url, req.delay_seconds],
             priority=10 - req.priority,
         )
         record["celery_task_id"] = task.id
@@ -644,7 +646,13 @@ def _get_paused_requests_for_service(service_id: str):
 
 def _requeue_request(record: dict):
     task = dispatch_task.apply_async(
-        args=[record["id"], record["service_id"], record.get("payload"), record.get("webhook_url")],
+        args=[
+            record["id"],
+            record["service_id"],
+            record.get("payload"),
+            record.get("webhook_url"),
+            record.get("delay_seconds", 3),
+        ],
         priority=10 - record.get("priority", 5),
     )
     record["celery_task_id"] = task.id

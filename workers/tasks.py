@@ -110,7 +110,14 @@ def _release_slot() -> None:
 
 
 @celery_app.task(bind=True, name="workers.tasks.dispatch_task", max_retries=3)
-def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_url: Optional[str] = None):
+def dispatch_task(
+    self,
+    request_id: str,
+    service_id: str,
+    payload: Any,
+    webhook_url: Optional[str] = None,
+    delay_seconds: float = 3,
+):
     """Main dispatch task that routes payload to the target service."""
 
     if redis_client.sismember(PAUSED_KEY, service_id):
@@ -144,6 +151,10 @@ def dispatch_task(self, request_id: str, service_id: str, payload: Any, webhook_
     _update_request(request_id, {"status": "running", "error": None})
 
     try:
+        delay_seconds = float(delay_seconds or 0)
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+
         service_type = service.get("type", "custom")
         headers = service.get("headers", {})
         timeout = int(service.get("timeout", 120))
