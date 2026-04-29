@@ -9,7 +9,15 @@ import requests
 
 PROJECT_REF = os.getenv("SUPABASE_PROJECT_REF", "rwvoskxjwobvukmujpcr")
 BASE_URL = os.getenv("SUPABASE_URL", f"https://{PROJECT_REF}.supabase.co").rstrip("/")
-API_KEY = os.getenv("SUPABASE_SECRET_KEY")
+# Preferred order:
+# 1) service-role key (legacy JWT style, most compatible for server PostgREST access)
+# 2) explicit API key
+# 3) secret key (new format)
+API_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    or os.getenv("SUPABASE_API_KEY")
+    or os.getenv("SUPABASE_SECRET_KEY")
+)
 SERVICES_TABLE = os.getenv("SUPABASE_SERVICES_TABLE", "orch_services")
 REQUESTS_TABLE = os.getenv("SUPABASE_REQUESTS_TABLE", "orch_requests")
 
