@@ -20,6 +20,7 @@ API_KEY = (
 )
 SERVICES_TABLE = os.getenv("SUPABASE_SERVICES_TABLE", "orch_services")
 REQUESTS_TABLE = os.getenv("SUPABASE_REQUESTS_TABLE", "orch_requests")
+SUPABASE_SCHEMA = os.getenv("SUPABASE_SCHEMA", "public")
 
 
 def is_supabase_enabled() -> bool:
@@ -33,6 +34,10 @@ def _headers(write: bool = False) -> dict[str, str]:
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
+    # Route PostgREST requests to the configured schema (non-public schemas included).
+    if SUPABASE_SCHEMA:
+        headers["Accept-Profile"] = SUPABASE_SCHEMA
+        headers["Content-Profile"] = SUPABASE_SCHEMA
     if write:
         headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
     return headers
