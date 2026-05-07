@@ -26,7 +26,7 @@ export const api = {
 
   requests: {
     list:   (params = {}) => {
-      const q = new URLSearchParams({ limit: 300, ...params }).toString()
+      const q = new URLSearchParams({ limit: 120, include_payload: false, ...params }).toString()
       return req(`/requests?${q}`)
     },
     get:    (id)   => req(`/requests/${id}`),

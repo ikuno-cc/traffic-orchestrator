@@ -225,6 +225,21 @@ def _find_duplicate_service(
     return None
 
 
+def _find_duplicate_service_name(name: str, exclude_id: Optional[str] = None) -> Optional[dict]:
+    _seed_services_from_supabase_if_needed()
+    all_services = redis_client.hgetall(SERVICES_KEY)
+    normalized_name = name.strip().lower()
+    for sid, raw in all_services.items():
+        if exclude_id and sid == exclude_id:
+            continue
+        item = json.loads(raw)
+        item_name = str(item.get("name", "")).strip().lower()
+        if item_name and item_name == normalized_name:
+            item["paused"] = redis_client.sismember(PAUSED_KEY, sid)
+            return item
+    return None
+
+
 def _worker_snapshot() -> dict:
     inspector = celery_app.control.inspect(timeout=1.0)
     stats = inspector.stats() or {}
@@ -318,6 +333,9 @@ def set_workers_concurrency(update: WorkerConcurrencyUpdate):
 
 @app.post("/services", status_code=201)
 def create_service(service: ServiceConfig):
+    duplicate_name = _find_duplicate_service_name(service.name)
+    if duplicate_name:
+        raise HTTPException(409, "Service with the same name already exists")
     duplicate = _find_duplicate_service(service.url, service.type)
     if duplicate:
         return JSONResponse(status_code=200, content=duplicate)
@@ -345,6 +363,9 @@ def get_service(service_id: str):
 
 @app.put("/services/{service_id}")
 def update_service(service_id: str, service: ServiceConfig):
+    duplicate_name = _find_duplicate_service_name(service.name, exclude_id=service_id)
+    if duplicate_name:
+        raise HTTPException(409, "Service with the same name already exists")
     duplicate = _find_duplicate_service(service.url, service.type, exclude_id=service_id)
     if duplicate:
         raise HTTPException(409, "Service with the same URL and type already exists")
@@ -467,7 +488,12 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
 
 
 @app.get("/requests")
-def list_requests(service_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100):
+def list_requests(
+    service_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    include_payload: bool = False,
+):
     limit = max(1, min(limit, 1000))
     _seed_requests_from_supabase_if_needed(limit=1000)
     _reconcile_requests_from_supabase(limit=1000)
@@ -483,6 +509,8 @@ def list_requests(service_id: Optional[str] = None, status: Optional[str] = None
     # Only sync Celery status for the page we are about to return to keep polling fast.
     page = records[:limit]
     page = [_sync_celery_status(r) for r in page]
+    if not include_payload:
+        page = [_strip_heavy_payload(r) for r in page]
     return page
 
 
@@ -613,3 +641,18 @@ def _requeue_request(record: dict):
     record["updated_at"] = datetime.utcnow().isoformat()
     redis_client.hset(REQUESTS_KEY, record["id"], json.dumps(record))
     _persist_request(record)
+
+
+def _strip_heavy_payload(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a lightweight copy suitable for list endpoints."""
+    out = dict(record)
+    payload = out.get("payload")
+    if isinstance(payload, dict):
+        payload_copy = dict(payload)
+        mp = payload_copy.get("multipart")
+        if isinstance(mp, dict) and "file_base64" in mp:
+            mp_copy = dict(mp)
+            mp_copy["file_base64"] = "__omitted__"
+            payload_copy["multipart"] = mp_copy
+        out["payload"] = payload_copy
+    return out

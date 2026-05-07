@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api/client'
 import { parseApiDate } from '../utils/datetime'
 
-const POLL_MS = 1500
-const FULL_POLL_MS = 10000
+const POLL_MS = 4000
+const FULL_POLL_MS = 20000
 
 function useStore() {
   const [services,  setServices]  = useState([])
@@ -16,6 +16,7 @@ function useStore() {
   const [error,     setError]     = useState(null)
   const reqPollRef = useRef(null)
   const fullPollRef = useRef(null)
+  const reqInFlightRef = useRef(false)
 
   const fetchAll = useCallback(async (silent = false) => {
     try {
@@ -42,12 +43,16 @@ function useStore() {
   }, [])
 
   const fetchRequestsOnly = useCallback(async () => {
+    if (reqInFlightRef.current) return
     try {
+      reqInFlightRef.current = true
       const reqs = await api.requests.list()
       setRequests(reqs)
       setLastPoll(new Date())
     } catch (e) {
       setError(e.message)
+    } finally {
+      reqInFlightRef.current = false
     }
   }, [])
 
