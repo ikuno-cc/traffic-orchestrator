@@ -5,7 +5,7 @@ import time
 import base64
 from datetime import datetime
 from typing import Any, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 import redis
 import requests as http_requests
@@ -847,6 +847,8 @@ def _normalize_omnivoice_payload(payload: Any) -> dict[str, Any]:
 
 def _send_generic(url: str, payload: Any, headers: dict[str, Any], timeout: int):
     multipart = _build_multipart_request(payload)
+    if multipart is None:
+        multipart = _build_image_edit_multipart_request(url, payload, timeout)
     if multipart is not None:
         form_data, files = multipart
         req_headers = {k: v for k, v in (headers or {}).items() if k.lower() != "content-type"}
@@ -922,4 +924,54 @@ def _build_multipart_request(payload: Any) -> Optional[tuple[dict[str, str], dic
     form_data = {str(k): ("" if v is None else str(v)) for k, v in raw_form.items()}
 
     files = {field_name: (filename, file_bytes, content_type)}
+    return form_data, files
+
+
+def _build_image_edit_multipart_request(
+    url: str, payload: Any, timeout: int
+) -> Optional[tuple[dict[str, str], dict[str, tuple[str, bytes, str]]]]:
+    """
+    Convenience shape for image-edit endpoints:
+    {
+      "image_url": "https://...",
+      "prompt": "...",
+      "size": "1024x1024",
+      "quality": "medium",
+      ...
+    }
+    This is converted into multipart with image[] + form fields.
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    image_url = payload.get("image_url")
+    if not isinstance(image_url, str) or not image_url.strip():
+        return None
+
+    if "/images/edits" not in (url or ""):
+        return None
+
+    img_resp = http_requests.get(image_url, timeout=min(timeout, 60))
+    img_resp.raise_for_status()
+    file_bytes = img_resp.content
+    if not file_bytes:
+        raise NonRetryableDispatchError("image_url downloaded empty content")
+
+    content_type = str(img_resp.headers.get("Content-Type") or "application/octet-stream")
+    parsed = urlparse(image_url)
+    base_name = os.path.basename(unquote(parsed.path)) or "upload.bin"
+    if "." not in base_name:
+        if "png" in content_type:
+            base_name = f"{base_name}.png"
+        elif "jpeg" in content_type or "jpg" in content_type:
+            base_name = f"{base_name}.jpg"
+        elif "webp" in content_type:
+            base_name = f"{base_name}.webp"
+
+    form_data = {
+        str(k): ("" if v is None else str(v))
+        for k, v in payload.items()
+        if k not in {"image_url", "multipart", "form"}
+    }
+    files = {"image[]": (base_name, file_bytes, content_type)}
     return form_data, files
