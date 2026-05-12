@@ -151,8 +151,9 @@ def set_workers_concurrency(update: WorkerConcurrencyUpdate):
 @app.post("/services", status_code=201)
 def create_service(service: ServiceConfig):
     _require_supabase()
-    if _find_duplicate_service_name(service.name):
-        raise HTTPException(409, "Service with the same name already exists")
+    duplicate_name = _find_duplicate_service_name(service.name)
+    if duplicate_name:
+        return JSONResponse(status_code=200, content=duplicate_name)
     duplicate = _find_duplicate_service(service.url, service.type)
     if duplicate:
         return JSONResponse(status_code=200, content=duplicate)
@@ -176,8 +177,9 @@ def update_service(service_id: str, service: ServiceConfig):
     existing = fetch_service_from_supabase(service_id)
     if not existing:
         raise HTTPException(404, "Service not found")
-    if _find_duplicate_service_name(service.name, exclude_id=service_id):
-        raise HTTPException(409, "Service with the same name already exists")
+    duplicate_name = _find_duplicate_service_name(service.name, exclude_id=service_id)
+    if duplicate_name:
+        return JSONResponse(status_code=200, content=duplicate_name)
     if _find_duplicate_service(service.url, service.type, exclude_id=service_id):
         raise HTTPException(409, "Service with the same URL and type already exists")
 
