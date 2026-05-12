@@ -127,18 +127,6 @@ function Field({ label, children }) {
 export default function Services({ services, serviceStats, refresh, toast }) {
   const [modal, setModal] = useState(null) // null | 'new' | service object
 
-  const handleWorkerCountChange = async (service, next) => {
-    const workerCount = Math.max(1, Math.min(64, Number(next) || 1))
-    try {
-      const { paused, ...rest } = service
-      await api.services.update(service.id, { ...rest, worker_count: workerCount })
-      toast(`Workers for ${service.name} set to ${workerCount}`, 'success')
-      refresh()
-    } catch (e) {
-      toast(e.message, 'error')
-    }
-  }
-
   const handleDelete = async (id) => {
     if (!confirm('Delete this service? All related request history stays.')) return
     try { await api.services.delete(id); toast('Service deleted', 'info'); refresh() }
@@ -244,27 +232,9 @@ export default function Services({ services, serviceStats, refresh, toast }) {
                     <div style={{ fontSize: 10, color: 'var(--text-3)' }}>delay</div>
                     <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{Number(s.delay_seconds ?? 3)}s</div>
                   </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <div style={{ fontSize: 10, color: 'var(--text-3)' }}>workers</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <button
-                        onClick={() => handleWorkerCountChange(s, (s.worker_count ?? 1) - 1)}
-                        style={workerStepBtn}
-                        title="Decrease workers"
-                      >
-                        -
-                      </button>
-                      <div style={workerStepValue}>
-                        {Math.max(1, Number(s.worker_count ?? 1))}
-                      </div>
-                      <button
-                        onClick={() => handleWorkerCountChange(s, (s.worker_count ?? 1) + 1)}
-                        style={workerStepBtn}
-                        title="Increase workers"
-                      >
-                        +
-                      </button>
-                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{Math.max(1, Number(s.worker_count ?? 1))}</div>
                   </div>
                 </div>
 
@@ -300,30 +270,3 @@ const btnPrimary = { ...btnBase, background: 'var(--cyan)', color: '#000' }
 const btnGhost   = { ...btnBase, background: 'transparent', border: '1px solid var(--border-2)', color: 'var(--text-2)' }
 const btnWarn    = { ...btnBase, background: 'rgba(251,191,36,.1)', border: '1px solid rgba(251,191,36,.3)', color: 'var(--amber)' }
 const btnSuccess = { ...btnBase, background: 'rgba(52,211,153,.1)', border: '1px solid rgba(52,211,153,.3)', color: 'var(--emerald)' }
-const workerStepBtn = {
-  width: 24,
-  height: 24,
-  padding: 0,
-  borderRadius: 6,
-  border: '1px solid var(--border-2)',
-  background: 'var(--bg-2)',
-  color: 'var(--text-1)',
-  fontFamily: 'var(--font-display)',
-  fontSize: 16,
-  lineHeight: '22px',
-  cursor: 'pointer',
-}
-const workerStepValue = {
-  minWidth: 28,
-  height: 24,
-  borderRadius: 6,
-  border: '1px solid var(--border-2)',
-  background: 'var(--bg-2)',
-  color: 'var(--text-1)',
-  fontFamily: 'var(--font-display)',
-  fontSize: 12,
-  fontWeight: 700,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-}

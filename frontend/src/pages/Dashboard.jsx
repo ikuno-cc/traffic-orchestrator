@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Cell } from 'recharts'
 import StatusBadge from '../components/StatusBadge'
-import { api } from '../api/client'
 import { parseApiDate } from '../utils/datetime'
 
 function StatCard({ label, value, sub, color, icon }) {
@@ -72,32 +71,7 @@ const STATUS_COLORS = {
   failed: '#fb7185', retrying: '#fbbf24', paused: '#fde68a', cancelled: '#4a5568',
 }
 
-function WorkerControl({ workers, refresh, toast }) {
-  const defaultTarget = Math.max(1, Number(workers?.configured_concurrency || 1))
-  const [target, setTarget] = useState(defaultTarget)
-  const [dirty, setDirty] = useState(false)
-  const [saving, setSaving] = useState(false)
-
-  useEffect(() => {
-    if (!dirty) setTarget(defaultTarget)
-  }, [defaultTarget, dirty])
-
-  const apply = async () => {
-    if (!workers) return
-    setSaving(true)
-    try {
-      const next = Math.max(1, Math.min(64, Number(target) || 1))
-      await api.workers.setConcurrency(next)
-      toast(`Set workers per service to ${next}`, 'success')
-      setDirty(false)
-      refresh()
-    } catch (e) {
-      toast(e.message, 'error')
-    } finally {
-      setSaving(false)
-    }
-  }
-
+function WorkerControl({ workers }) {
   return (
     <div style={{ background: 'var(--bg-2)', border: '1px solid var(--border-1)', borderRadius: 'var(--radius-md)', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
@@ -107,52 +81,18 @@ function WorkerControl({ workers, refresh, toast }) {
         </span>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <input
-          type="range"
-          min="1"
-          max="64"
-          value={target}
-          onChange={(e) => { setTarget(Number(e.target.value)); setDirty(true) }}
-          disabled={!workers || saving}
-          style={{ flex: 1, accentColor: 'var(--cyan)' }}
-        />
-        <span style={{ minWidth: 36, textAlign: 'center', fontFamily: 'var(--font-display)', fontSize: 22, color: 'var(--cyan)' }}>
-          {target}
-        </span>
-      </div>
-
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, color: 'var(--text-3)' }}>
         <span>Total configured workers: {workers?.total_concurrency || 0}</span>
         <span>Services: {workers?.workers?.length || 0}</span>
       </div>
 
       <div style={{ fontSize: 10, color: 'var(--text-3)' }}>
-        Applies the same worker count to all services.
+        Worker count is edited per service from the Services page.
       </div>
-
-      <button
-        onClick={apply}
-        disabled={!dirty || saving || !workers}
-        style={{
-          alignSelf: 'flex-start',
-          background: 'var(--cyan)',
-          color: '#001018',
-          border: 'none',
-          padding: '7px 12px',
-          borderRadius: 6,
-          fontFamily: 'var(--font-mono)',
-          fontSize: 11,
-          fontWeight: 700,
-          opacity: (!dirty || saving || !workers) ? 0.55 : 1,
-          cursor: (!dirty || saving || !workers) ? 'not-allowed' : 'pointer',
-        }}
-      >
-        {saving ? 'Applying...' : 'Apply Worker Count'}
-      </button>
     </div>
   )
 }
+
 
 export default function Dashboard({ requests, services, stats, serviceStats, workers, refresh, toast }) {
   const [tick, setTick] = useState(0)
@@ -282,7 +222,7 @@ export default function Dashboard({ requests, services, stats, serviceStats, wor
         </div>
       </div>
 
-      <WorkerControl workers={workers} refresh={refresh} toast={toast} />
+      <WorkerControl workers={workers} />
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         {/* Services health */}
