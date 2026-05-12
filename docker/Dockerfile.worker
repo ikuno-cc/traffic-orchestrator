@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY workers/ ./workers/
 
-CMD ["celery", "-A", "workers.celery_app", "worker", "--loglevel=info", "--concurrency=4", "--queues=celery"]
+CMD ["python", "-m", "workers.runner"]
