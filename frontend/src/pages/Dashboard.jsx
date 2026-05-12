@@ -73,7 +73,7 @@ const STATUS_COLORS = {
 }
 
 function WorkerControl({ workers, refresh, toast }) {
-  const defaultTarget = workers?.configured_concurrency || 1
+  const defaultTarget = Math.max(1, Number(workers?.configured_concurrency || 1))
   const [target, setTarget] = useState(defaultTarget)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -83,11 +83,12 @@ function WorkerControl({ workers, refresh, toast }) {
   }, [defaultTarget, dirty])
 
   const apply = async () => {
-    if (!workers?.online_workers) return
+    if (!workers) return
     setSaving(true)
     try {
-      await api.workers.setConcurrency(Number(target))
-      toast(`Set max parallel requests to ${target}`, 'success')
+      const next = Math.max(1, Math.min(64, Number(target) || 1))
+      await api.workers.setConcurrency(next)
+      toast(`Set workers per service to ${next}`, 'success')
       setDirty(false)
       refresh()
     } catch (e) {
@@ -110,10 +111,10 @@ function WorkerControl({ workers, refresh, toast }) {
         <input
           type="range"
           min="1"
-          max="16"
+          max="64"
           value={target}
-          onChange={(e) => { setTarget(e.target.value); setDirty(true) }}
-          disabled={!workers?.online_workers || saving}
+          onChange={(e) => { setTarget(Number(e.target.value)); setDirty(true) }}
+          disabled={!workers || saving}
           style={{ flex: 1, accentColor: 'var(--cyan)' }}
         />
         <span style={{ minWidth: 36, textAlign: 'center', fontFamily: 'var(--font-display)', fontSize: 22, color: 'var(--cyan)' }}>
@@ -122,19 +123,17 @@ function WorkerControl({ workers, refresh, toast }) {
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, color: 'var(--text-3)' }}>
-        <span>Runtime capacity: {workers?.total_concurrency || 0}</span>
-        <span>Running now: {workers?.running_slots || 0}</span>
+        <span>Total configured workers: {workers?.total_concurrency || 0}</span>
+        <span>Services: {workers?.workers?.length || 0}</span>
       </div>
 
-      {workers?.mixed_concurrency && (
-        <div style={{ fontSize: 10, color: 'var(--amber)' }}>
-          Workers have mixed internal pool sizes; UI control enforces a global max parallel request limit.
-        </div>
-      )}
+      <div style={{ fontSize: 10, color: 'var(--text-3)' }}>
+        Applies the same worker count to all services.
+      </div>
 
       <button
         onClick={apply}
-        disabled={!dirty || saving || !workers?.online_workers}
+        disabled={!dirty || saving || !workers}
         style={{
           alignSelf: 'flex-start',
           background: 'var(--cyan)',
@@ -145,11 +144,11 @@ function WorkerControl({ workers, refresh, toast }) {
           fontFamily: 'var(--font-mono)',
           fontSize: 11,
           fontWeight: 700,
-          opacity: (!dirty || saving || !workers?.online_workers) ? 0.55 : 1,
-          cursor: (!dirty || saving || !workers?.online_workers) ? 'not-allowed' : 'pointer',
+          opacity: (!dirty || saving || !workers) ? 0.55 : 1,
+          cursor: (!dirty || saving || !workers) ? 'not-allowed' : 'pointer',
         }}
       >
-        {saving ? 'Applying...' : 'Apply Concurrency'}
+        {saving ? 'Applying...' : 'Apply Worker Count'}
       </button>
     </div>
   )
