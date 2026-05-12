@@ -1,7 +1,7 @@
 services:
   api:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.api
     environment:
       - SUPABASE_PROJECT_REF=${SUPABASE_PROJECT_REF}
@@ -23,7 +23,7 @@ services:
 
   worker:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.worker
     environment:
       - SUPABASE_PROJECT_REF=${SUPABASE_PROJECT_REF}
@@ -41,7 +41,7 @@ services:
 
   gui:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.gui
     ports:
       - "80:80"
