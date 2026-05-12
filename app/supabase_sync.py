@@ -87,13 +87,26 @@ def _request_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def fetch_services_from_supabase() -> list[dict[str, Any]]:
+    query = (
+        f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,worker_count,created_at"
+        "&order=created_at.desc"
+    )
     resp = _request(
         "GET",
-        f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,created_at&order=created_at.desc",
+        query,
         headers=_headers(),
+        allow_error=True,
     )
     if resp is None:
         return []
+    if resp.status_code == 400 and "worker_count" in (resp.text or ""):
+        resp = _request(
+            "GET",
+            f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,created_at&order=created_at.desc",
+            headers=_headers(),
+        )
+        if resp is None:
+            return []
 
     rows = resp.json()
     services: list[dict[str, Any]] = []
@@ -109,6 +122,7 @@ def fetch_services_from_supabase() -> list[dict[str, Any]]:
                 "enabled": bool(row.get("enabled", True)),
                 "headers": row.get("custom_header") or {},
                 "delay_seconds": float(row.get("delay_seconds", 3) or 3),
+                "worker_count": int(row.get("worker_count") or 1),
                 "created_at": row.get("created_at"),
             }
         )
@@ -119,11 +133,20 @@ def fetch_service_from_supabase(service_id: str) -> Optional[dict[str, Any]]:
     sid = quote_plus(service_id)
     resp = _request(
         "GET",
-        f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,created_at&id=eq.{sid}&limit=1",
+        f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,worker_count,created_at&id=eq.{sid}&limit=1",
         headers=_headers(),
+        allow_error=True,
     )
     if resp is None:
         return None
+    if resp.status_code == 400 and "worker_count" in (resp.text or ""):
+        resp = _request(
+            "GET",
+            f"{SERVICES_TABLE}?select=id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,created_at&id=eq.{sid}&limit=1",
+            headers=_headers(),
+        )
+        if resp is None:
+            return None
     rows = resp.json()
     if not rows:
         return None
@@ -138,7 +161,8 @@ def fetch_service_from_supabase(service_id: str) -> Optional[dict[str, Any]]:
         "enabled": bool(row.get("enabled", True)),
         "headers": row.get("custom_header") or {},
         "delay_seconds": float(row.get("delay_seconds", 3) or 3),
-        "created_at": row.get("created_at"),
+        "worker_count": int(row.get("worker_count") or 1),
+                "created_at": row.get("created_at"),
     }
 
 
@@ -153,6 +177,7 @@ def sync_service_to_supabase(service: dict[str, Any]) -> None:
         "delay_seconds": float(service.get("delay_seconds", 3) or 3),
         "enabled": bool(service.get("enabled", True)),
         "custom_header": service.get("headers", {}),
+        "worker_count": int(service.get("worker_count", 1) or 1),
         "created_at": service.get("created_at"),
     }
     resp = _request(
@@ -166,6 +191,16 @@ def sync_service_to_supabase(service: dict[str, Any]) -> None:
         # Backward-compatible fallback for older schemas that do not yet have delay_seconds.
         payload_compat = dict(payload)
         payload_compat.pop("delay_seconds", None)
+        resp = _request(
+            "POST",
+            f"{SERVICES_TABLE}",
+            headers=_headers(write=True),
+            data=json.dumps([payload_compat]),
+            allow_error=True,
+        )
+    if resp is not None and resp.status_code == 400 and "worker_count" in (resp.text or ""):
+        payload_compat = dict(payload)
+        payload_compat.pop("worker_count", None)
         resp = _request(
             "POST",
             f"{SERVICES_TABLE}",
@@ -257,3 +292,45 @@ def delete_request_from_supabase(request_id: str) -> bool:
     rid = quote_plus(request_id)
     resp = _request("DELETE", f"{REQUESTS_TABLE}?id=eq.{rid}", headers=_headers(), allow_error=True)
     return resp is not None and resp.status_code < 400
+
+
+def update_request_fields(request_id: str, updates: dict[str, Any]) -> bool:
+    rid = quote_plus(request_id)
+    resp = _request(
+        "PATCH",
+        f"{REQUESTS_TABLE}?id=eq.{rid}",
+        headers=_headers(write=True),
+        data=json.dumps(updates),
+        allow_error=True,
+    )
+    return resp is not None and resp.status_code < 400
+
+
+def claim_next_queued_request(service_id: str) -> Optional[dict[str, Any]]:
+    sid = quote_plus(service_id)
+    resp = _request(
+        "GET",
+        f"{REQUESTS_TABLE}?select=id,service_id,status,info,priority,duration,created_at&service_id=eq.{sid}&status=eq.queued&order=priority.asc,created_at.asc&limit=1",
+        headers=_headers(),
+    )
+    if resp is None:
+        return None
+    rows = resp.json()
+    if not rows:
+        return None
+
+    row = rows[0]
+    rid = quote_plus(str(row.get("id")))
+    claim_resp = _request(
+        "PATCH",
+        f"{REQUESTS_TABLE}?id=eq.{rid}&status=eq.queued",
+        headers={**_headers(write=True), "Prefer": "return=representation"},
+        data=json.dumps({"status": "running"}),
+        allow_error=True,
+    )
+    if claim_resp is None or claim_resp.status_code >= 400:
+        return None
+    claimed_rows = claim_resp.json() if claim_resp.text else []
+    if not claimed_rows:
+        return None
+    return _request_row_to_record(claimed_rows[0])

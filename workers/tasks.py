@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import time
@@ -7,23 +6,9 @@ from datetime import datetime
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
-import redis
 import requests as http_requests
 
-from app.supabase_sync import is_supabase_enabled, sync_request_to_supabase
-from workers.celery_app import celery_app
-
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "redis"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    decode_responses=True,
-)
-
-SERVICES_KEY = "orchestrator:services"
-REQUESTS_KEY = "orchestrator:requests"
-PAUSED_KEY = "orchestrator:paused_services"
-WORKER_LIMIT_KEY = "orchestrator:worker_limit"
-RUNNING_SLOTS_KEY = "orchestrator:running_slots"
+from app.supabase_sync import fetch_service_from_supabase, is_supabase_enabled, sync_request_to_supabase
 
 
 class NonRetryableDispatchError(Exception):
@@ -31,30 +16,20 @@ class NonRetryableDispatchError(Exception):
 
 
 def _resolve_url(url: Optional[str]) -> Optional[str]:
-    """Map localhost URLs to host.docker.internal for container-to-host calls."""
     if not url:
         return url
-    fixed = re.sub(
-        r"(https?://)(?:localhost|127\.0\.0\.1)",
-        r"\1host.docker.internal",
-        url,
-        flags=re.IGNORECASE,
-    )
+    fixed = re.sub(r"(https?://)(?:localhost|127\.0\.0\.1)", r"\1host.docker.internal", url, flags=re.IGNORECASE)
     if fixed != url:
         print(f"[URL-FIX] {url} -> {fixed}")
     return fixed
 
 
-def _update_request(request_id: str, updates: dict[str, Any]) -> None:
-    raw = redis_client.hget(REQUESTS_KEY, request_id)
-    if not raw:
-        return
-    record = json.loads(raw)
+def _update_request(record: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     record.update(updates)
     record["updated_at"] = datetime.utcnow().isoformat()
-    redis_client.hset(REQUESTS_KEY, request_id, json.dumps(record))
     if is_supabase_enabled():
         sync_request_to_supabase(record)
+    return record
 
 
 def _truncate(value: Any, limit: int = 500) -> str:
@@ -85,131 +60,33 @@ def _extract_comfyui_artifacts(response: Any) -> list[dict[str, Any]]:
                     continue
                 if not all(k in item for k in ("filename", "subfolder", "type")):
                     continue
-                artifacts.append(
-                    {
-                        "node_id": str(node_id),
-                        "kind": media_key,
-                        "filename": item.get("filename"),
-                        "subfolder": item.get("subfolder"),
-                        "type": item.get("type"),
-                    }
-                )
+                artifacts.append({"node_id": str(node_id), "kind": media_key, "filename": item.get("filename"), "subfolder": item.get("subfolder"), "type": item.get("type")})
     return artifacts
 
 
-def _request_context(request_id: str) -> tuple[Optional[Any], dict[str, Any]]:
-    raw = redis_client.hget(REQUESTS_KEY, request_id)
-    if not raw:
-        return None, {}
-    try:
-        record = json.loads(raw)
-    except Exception:
-        return None, {}
-    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+def process_dispatch_request(record: dict[str, Any]) -> dict[str, Any]:
+    request_id = str(record.get("id"))
+    service_id = str(record.get("service_id"))
+    payload = record.get("payload")
+    webhook_url = record.get("webhook_url")
+    delay_seconds = float(record.get("delay_seconds") or 0)
+
     scene_id = record.get("scene_id")
-    if scene_id is None:
-        scene_id = metadata.get("scene_id")
-    return scene_id, metadata
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
 
-
-def _get_parallel_limit() -> int:
-    raw = redis_client.get(WORKER_LIMIT_KEY)
-    try:
-        val = int(raw) if raw else 0
-    except ValueError:
-        val = 0
-    return max(0, val)
-
-
-def _try_acquire_slot(limit: int) -> bool:
-    if limit <= 0:
-        return True
-
-    for _ in range(10):
-        pipe = redis_client.pipeline()
-        try:
-            pipe.watch(RUNNING_SLOTS_KEY)
-            current = int(pipe.get(RUNNING_SLOTS_KEY) or 0)
-            if current >= limit:
-                return False
-            pipe.multi()
-            pipe.incr(RUNNING_SLOTS_KEY)
-            pipe.execute()
-            return True
-        except redis.WatchError:
-            continue
-        finally:
-            pipe.reset()
-    return False
-
-
-def _release_slot() -> None:
-    for _ in range(10):
-        pipe = redis_client.pipeline()
-        try:
-            pipe.watch(RUNNING_SLOTS_KEY)
-            current = int(pipe.get(RUNNING_SLOTS_KEY) or 0)
-            new_val = max(0, current - 1)
-            pipe.multi()
-            pipe.set(RUNNING_SLOTS_KEY, new_val)
-            pipe.execute()
-            return
-        except redis.WatchError:
-            continue
-        finally:
-            pipe.reset()
-
-
-@celery_app.task(bind=True, name="workers.tasks.dispatch_task", max_retries=0)
-def dispatch_task(
-    self,
-    request_id: str,
-    service_id: str,
-    payload: Any,
-    webhook_url: Optional[str] = None,
-    delay_seconds: float = 3,
-):
-    """Main dispatch task that routes payload to the target service."""
-    scene_id, metadata = _request_context(request_id)
-
-    if redis_client.sismember(PAUSED_KEY, service_id):
-        _update_request(request_id, {"status": "paused"})
+    service = fetch_service_from_supabase(service_id)
+    if not service:
+        _update_request(record, {"status": "failed", "error": "Service not found"})
+        return {"status": "failed", "request_id": request_id, "scene_id": scene_id, "metadata": metadata, "error": "Service not found"}
+    if not service.get("enabled", True):
+        _update_request(record, {"status": "paused", "error": "Service is paused/disabled"})
         return {"status": "paused", "request_id": request_id, "scene_id": scene_id, "metadata": metadata}
 
-    raw = redis_client.hget(SERVICES_KEY, service_id)
-    if not raw:
-        _update_request(request_id, {"status": "failed", "error": "Service not found"})
-        return {
-            "status": "failed",
-            "request_id": request_id,
-            "scene_id": scene_id,
-            "metadata": metadata,
-            "error": "Service not found",
-        }
-
-    service = json.loads(raw)
     service_url = _resolve_url(service.get("url"))
     webhook_url = _resolve_url(webhook_url)
-
-    slot_acquired = False
-    while not slot_acquired:
-        limit = _get_parallel_limit()
-        if _try_acquire_slot(limit):
-            slot_acquired = True
-            break
-        _update_request(
-            request_id,
-            {
-                "status": "queued",
-                "error": f"Waiting for worker slot ({limit} max parallel)",
-            },
-        )
-        time.sleep(0.3)
-
-    _update_request(request_id, {"status": "running", "error": None})
+    _update_request(record, {"status": "running", "error": None})
 
     try:
-        delay_seconds = float(delay_seconds or 0)
         if delay_seconds > 0:
             time.sleep(delay_seconds)
 
@@ -226,151 +103,41 @@ def dispatch_task(
         else:
             response = _send_generic(service_url, payload, headers, timeout)
 
-        _update_request(
-            request_id,
-            {
-                "status": "success",
-                "response_summary": str(response)[:500],
-                "error": None,
-            },
-        )
+        _update_request(record, {"status": "success", "response_summary": str(response)[:500], "error": None})
 
+        webhook_result = None
         if webhook_url:
             artifacts = _extract_comfyui_artifacts(response)
             first_artifact = artifacts[0] if artifacts else None
-            webhook_result = _fire_webhook(
-                webhook_url,
-                {
-                    "request_id": request_id,
-                    "scene_id": scene_id,
-                    "metadata": metadata,
-                    "status": "success",
-                    "service_id": service_id,
-                    "response": response,
-                    "outputs": response.get("history", {}).get("outputs") if isinstance(response, dict) else None,
-                    "artifacts": artifacts,
-                    "artifact": first_artifact,
-                },
-            )
+            webhook_result = _fire_webhook(webhook_url, {
+                "request_id": request_id,
+                "scene_id": scene_id,
+                "metadata": metadata,
+                "status": "success",
+                "service_id": service_id,
+                "response": response,
+                "outputs": response.get("history", {}).get("outputs") if isinstance(response, dict) else None,
+                "artifacts": artifacts,
+                "artifact": first_artifact,
+            })
             if webhook_result:
-                _update_request(
-                    request_id,
-                    {
-                        "webhook_status": webhook_result.get("status"),
-                        "webhook_response_summary": _truncate(webhook_result.get("body")),
-                        "webhook_error": webhook_result.get("error"),
-                    },
-                )
-        return {
-            "status": "success",
-            "request_id": request_id,
-            "scene_id": scene_id,
-            "metadata": metadata,
-            "response": response,
-            "webhook_response": webhook_result.get("body") if webhook_url and webhook_result else None,
-            "webhook_status": webhook_result.get("status") if webhook_url and webhook_result else None,
-            "webhook_error": webhook_result.get("error") if webhook_url and webhook_result else None,
-        }
+                _update_request(record, {"webhook_status": webhook_result.get("status"), "webhook_response_summary": _truncate(webhook_result.get("body")), "webhook_error": webhook_result.get("error")})
 
+        return {"status": "success", "request_id": request_id, "scene_id": scene_id, "metadata": metadata, "response": response}
     except Exception as exc:
         error_msg = str(exc)
-        attempt = self.request.retries
-        max_ret = self.max_retries
-
-        if isinstance(exc, NonRetryableDispatchError):
-            _update_request(
-                request_id,
-                {
-                    "status": "failed",
-                    "error": error_msg,
-                    "retry_count": attempt + 1,
-                },
-            )
-            webhook_result = _fire_webhook(
-                webhook_url,
-                {
-                    "request_id": request_id,
-                    "scene_id": scene_id,
-                    "metadata": metadata,
-                    "status": "failed",
-                    "service_id": service_id,
-                    "error": error_msg,
-                },
-            )
-            if webhook_result:
-                _update_request(
-                    request_id,
-                    {
-                        "webhook_status": webhook_result.get("status"),
-                        "webhook_response_summary": _truncate(webhook_result.get("body")),
-                        "webhook_error": webhook_result.get("error"),
-                    },
-                )
-            return {
-                "status": "failed",
-                "request_id": request_id,
-                "scene_id": scene_id,
-                "metadata": metadata,
-                "error": error_msg,
-                "webhook_response": webhook_result.get("body") if webhook_result else None,
-                "webhook_status": webhook_result.get("status") if webhook_result else None,
-                "webhook_error": webhook_result.get("error") if webhook_result else None,
-            }
-
-        if attempt < max_ret:
-            countdown = 5 * (2 ** attempt)
-            _update_request(
-                request_id,
-                {
-                    "status": "retrying",
-                    "error": f"Attempt {attempt + 1}/{max_ret + 1} failed: {error_msg}. Retrying in {countdown}s...",
-                    "retry_count": attempt + 1,
-                },
-            )
-            raise self.retry(exc=exc, countdown=countdown)
-
-        _update_request(
-            request_id,
-            {
-                "status": "failed",
-                "error": error_msg,
-                "retry_count": attempt + 1,
-            },
-        )
-        webhook_result = _fire_webhook(
-            webhook_url,
-            {
-                "request_id": request_id,
-                "scene_id": scene_id,
-                "metadata": metadata,
-                "status": "failed",
-                "service_id": service_id,
-                "error": error_msg,
-            },
-        )
-        if webhook_result:
-            _update_request(
-                request_id,
-                {
-                    "webhook_status": webhook_result.get("status"),
-                    "webhook_response_summary": _truncate(webhook_result.get("body")),
-                    "webhook_error": webhook_result.get("error"),
-                },
-            )
-        return {
-            "status": "failed",
+        _update_request(record, {"status": "failed", "error": error_msg, "retry_count": int(record.get("retry_count") or 0) + 1})
+        webhook_result = _fire_webhook(webhook_url, {
             "request_id": request_id,
             "scene_id": scene_id,
             "metadata": metadata,
+            "status": "failed",
+            "service_id": service_id,
             "error": error_msg,
-            "webhook_response": webhook_result.get("body") if webhook_result else None,
-            "webhook_status": webhook_result.get("status") if webhook_result else None,
-            "webhook_error": webhook_result.get("error") if webhook_result else None,
-        }
-    finally:
-        if slot_acquired:
-            _release_slot()
-
+        })
+        if webhook_result:
+            _update_request(record, {"webhook_status": webhook_result.get("status"), "webhook_response_summary": _truncate(webhook_result.get("body")), "webhook_error": webhook_result.get("error")})
+        return {"status": "failed", "request_id": request_id, "scene_id": scene_id, "metadata": metadata, "error": error_msg}
 
 def _fire_webhook(webhook_url: Optional[str], body: dict[str, Any]) -> Optional[dict[str, Any]]:
     if not webhook_url:
