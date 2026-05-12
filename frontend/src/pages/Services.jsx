@@ -18,6 +18,7 @@ function ServiceModal({ service, onClose, onSave, toast }) {
     description: service?.description || '',
     timeout:     service?.timeout     || 120,
     delay_seconds: service?.delay_seconds ?? 3,
+    worker_count: service?.worker_count ?? 1,
     enabled:     service?.enabled     ?? true,
     headers:     JSON.stringify(service?.headers || {}, null, 2),
   })
@@ -38,6 +39,7 @@ function ServiceModal({ service, onClose, onSave, toast }) {
         headers,
         timeout: parseInt(form.timeout),
         delay_seconds: Math.max(0, Number(form.delay_seconds) || 3),
+        worker_count: Math.max(1, parseInt(form.worker_count || 1)),
       }
       if (editing) await api.services.update(service.id, data)
       else         await api.services.create(data)
@@ -80,12 +82,15 @@ function ServiceModal({ service, onClose, onSave, toast }) {
           <input style={inputStyle} value={form.description} onChange={e => set('description', e.target.value)} placeholder="Short description…" />
         </Field>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
           <Field label="Timeout (seconds)">
             <input style={inputStyle} type="number" value={form.timeout} onChange={e => set('timeout', e.target.value)} min={5} max={3600} />
           </Field>
           <Field label="Delay (seconds)">
             <input style={inputStyle} type="number" value={form.delay_seconds} onChange={e => set('delay_seconds', e.target.value)} min={0} step="0.1" max={3600} />
+          </Field>
+          <Field label="Workers">
+            <input style={inputStyle} type="number" value={form.worker_count} onChange={e => set('worker_count', e.target.value)} min={1} max={64} />
           </Field>
           <Field label="Enabled">
             <select style={inputStyle} value={String(form.enabled)} onChange={e => set('enabled', e.target.value === 'true')}>
@@ -121,6 +126,18 @@ function Field({ label, children }) {
 
 export default function Services({ services, serviceStats, refresh, toast }) {
   const [modal, setModal] = useState(null) // null | 'new' | service object
+
+  const handleWorkerCountChange = async (service, next) => {
+    const workerCount = Math.max(1, Math.min(64, Number(next) || 1))
+    try {
+      const { paused, ...rest } = service
+      await api.services.update(service.id, { ...rest, worker_count: workerCount })
+      toast(`Workers for ${service.name} set to ${workerCount}`, 'success')
+      refresh()
+    } catch (e) {
+      toast(e.message, 'error')
+    }
+  }
 
   const handleDelete = async (id) => {
     if (!confirm('Delete this service? All related request history stays.')) return
@@ -226,6 +243,26 @@ export default function Services({ services, serviceStats, refresh, toast }) {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <div style={{ fontSize: 10, color: 'var(--text-3)' }}>delay</div>
                     <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{Number(s.delay_seconds ?? 3)}s</div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <div style={{ fontSize: 10, color: 'var(--text-3)' }}>workers</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <button
+                        onClick={() => handleWorkerCountChange(s, (s.worker_count ?? 1) - 1)}
+                        style={{ ...btnGhost, padding: '2px 8px' }}
+                      >
+                        -
+                      </button>
+                      <div style={{ fontSize: 11, color: 'var(--text-2)', minWidth: 18, textAlign: 'center' }}>
+                        {Math.max(1, Number(s.worker_count ?? 1))}
+                      </div>
+                      <button
+                        onClick={() => handleWorkerCountChange(s, (s.worker_count ?? 1) + 1)}
+                        style={{ ...btnGhost, padding: '2px 8px' }}
+                      >
+                        +
+                      </button>
+                    </div>
                   </div>
                 </div>
 
