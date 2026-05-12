@@ -192,7 +192,17 @@ def _safe_json_or_text(resp: http_requests.Response) -> dict[str, Any]:
         }
 
     text = (resp.text or "").strip()
-    return {"raw": text[:1000], "status": resp.status_code}
+    return {"raw": text, "status": resp.status_code}
+
+
+def _raise_service_http_error(resp: http_requests.Response, source: str, url: str) -> None:
+    if resp.status_code < 400:
+        return
+    detail = _safe_json_or_text(resp)
+    message = f"{source} {resp.status_code} at {url}: {detail}"
+    if 400 <= resp.status_code < 500:
+        raise NonRetryableDispatchError(message)
+    raise RuntimeError(message)
 
 
 def _send_to_comfyui(url: str, payload: Any, headers: dict[str, Any], timeout: int):
@@ -536,7 +546,7 @@ def _send_to_n8n(url: str, payload: Any, headers: dict[str, Any], timeout: int):
             headers={"Content-Type": "application/json", **headers},
             timeout=timeout,
         )
-    resp.raise_for_status()
+    _raise_service_http_error(resp, "n8n", url)
     parsed = _safe_json_or_text(resp)
     _raise_if_logical_failure(parsed, "n8n")
     return parsed
@@ -550,7 +560,7 @@ def _send_to_omnivoice(url: str, payload: Any, headers: dict[str, Any], timeout:
         headers={"Content-Type": "application/json", **headers},
         timeout=timeout,
     )
-    resp.raise_for_status()
+    _raise_service_http_error(resp, "omnivoice", url)
     parsed = _safe_json_or_text(resp)
     _raise_if_logical_failure(parsed, "omnivoice")
     return parsed
@@ -627,7 +637,7 @@ def _send_generic(url: str, payload: Any, headers: dict[str, Any], timeout: int)
             headers={"Content-Type": "application/json", **headers},
             timeout=timeout,
         )
-    resp.raise_for_status()
+    _raise_service_http_error(resp, "service", url)
     parsed = _safe_json_or_text(resp)
     _raise_if_logical_failure(parsed, "service")
     return parsed

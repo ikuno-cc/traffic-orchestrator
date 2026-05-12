@@ -221,9 +221,18 @@ def resume_service(service_id: str):
     sync_service_to_supabase(service)
 
     paused_reqs = fetch_requests_from_supabase(service_id=service_id, status="paused", limit=1000)
+    failed_reqs = fetch_requests_from_supabase(service_id=service_id, status="failed", limit=1000)
     requeued = 0
-    for req in paused_reqs:
-        update_request_fields(req["id"], {"status": "queued", "error": None, "updated_at": datetime.utcnow().isoformat()})
+    for req in paused_reqs + failed_reqs:
+        update_request_fields(
+            req["id"],
+            {
+                "status": "queued",
+                "error": None,
+                "retry_count": 0,
+                "updated_at": datetime.utcnow().isoformat(),
+            },
+        )
         requeued += 1
     return {"status": "resumed", "service_id": service_id, "requeued": requeued}
 
@@ -290,6 +299,29 @@ def cancel_request(request_id: str):
         return {"cancelled": request_id}
     update_request_fields(request_id, {"status": "cancelled", "updated_at": datetime.utcnow().isoformat()})
     return {"cancelled": request_id}
+
+
+@app.post("/requests/{request_id}/retry")
+def retry_request(request_id: str):
+    _require_supabase()
+    record = fetch_request_from_supabase(request_id)
+    if not record:
+        raise HTTPException(404, "Request not found")
+    if record.get("status") in {"running", "queued"}:
+        return {"request_id": request_id, "status": record.get("status"), "updated": False}
+    if record.get("status") == "cancelled":
+        raise HTTPException(409, "Cancelled requests cannot be retried")
+
+    update_request_fields(
+        request_id,
+        {
+            "status": "queued",
+            "error": None,
+            "retry_count": 0,
+            "updated_at": datetime.utcnow().isoformat(),
+        },
+    )
+    return {"request_id": request_id, "status": "queued", "updated": True}
 
 
 @app.delete("/requests/{request_id}")

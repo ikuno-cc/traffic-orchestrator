@@ -246,19 +246,21 @@ export default function Services({ services, serviceStats, refresh, toast }) {
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <div style={{ fontSize: 10, color: 'var(--text-3)' }}>workers</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <button
                         onClick={() => handleWorkerCountChange(s, (s.worker_count ?? 1) - 1)}
-                        style={{ ...btnGhost, padding: '2px 8px' }}
+                        style={workerStepBtn}
+                        title="Decrease workers"
                       >
                         -
                       </button>
-                      <div style={{ fontSize: 11, color: 'var(--text-2)', minWidth: 18, textAlign: 'center' }}>
+                      <div style={workerStepValue}>
                         {Math.max(1, Number(s.worker_count ?? 1))}
                       </div>
                       <button
                         onClick={() => handleWorkerCountChange(s, (s.worker_count ?? 1) + 1)}
-                        style={{ ...btnGhost, padding: '2px 8px' }}
+                        style={workerStepBtn}
+                        title="Increase workers"
                       >
                         +
                       </button>
@@ -298,3 +300,30 @@ const btnPrimary = { ...btnBase, background: 'var(--cyan)', color: '#000' }
 const btnGhost   = { ...btnBase, background: 'transparent', border: '1px solid var(--border-2)', color: 'var(--text-2)' }
 const btnWarn    = { ...btnBase, background: 'rgba(251,191,36,.1)', border: '1px solid rgba(251,191,36,.3)', color: 'var(--amber)' }
 const btnSuccess = { ...btnBase, background: 'rgba(52,211,153,.1)', border: '1px solid rgba(52,211,153,.3)', color: 'var(--emerald)' }
+const workerStepBtn = {
+  width: 24,
+  height: 24,
+  padding: 0,
+  borderRadius: 6,
+  border: '1px solid var(--border-2)',
+  background: 'var(--bg-2)',
+  color: 'var(--text-1)',
+  fontFamily: 'var(--font-display)',
+  fontSize: 16,
+  lineHeight: '22px',
+  cursor: 'pointer',
+}
+const workerStepValue = {
+  minWidth: 28,
+  height: 24,
+  borderRadius: 6,
+  border: '1px solid var(--border-2)',
+  background: 'var(--bg-2)',
+  color: 'var(--text-1)',
+  fontFamily: 'var(--font-display)',
+  fontSize: 12,
+  fontWeight: 700,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
