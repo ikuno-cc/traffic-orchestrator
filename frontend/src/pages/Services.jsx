@@ -210,29 +210,29 @@ export default function Services({ services, serviceStats, refresh, toast }) {
                 </div>
 
                 {/* Stats row */}
-                <div style={{ display: 'flex', gap: 16, background: 'var(--bg-3)', borderRadius: 8, padding: '10px 12px' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, background: 'var(--bg-3)', borderRadius: 8, padding: '10px 12px' }}>
                   {[
                     { label: 'Running', val: ss.running || 0, color: 'var(--cyan)'    },
                     { label: 'Success', val: ss.success || 0, color: 'var(--emerald)' },
                     { label: 'Failed',  val: ss.failed  || 0, color: ss.failed > 0 ? 'var(--rose)' : 'var(--text-3)' },
                     { label: 'Total',   val: ss.total   || 0, color: 'var(--text-2)'  },
                   ].map(st => (
-                    <div key={st.label} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <div key={st.label} style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 52 }}>
                       <div style={{ fontFamily: 'var(--font-display)', fontSize: 18, fontWeight: 700, color: st.color, lineHeight: 1 }}>
                         {st.val}
                       </div>
                       <div style={{ fontSize: 9, color: 'var(--text-3)', letterSpacing: '.06em' }}>{st.label}</div>
                     </div>
                   ))}
-                  <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', gap: 1, minWidth: 52 }}>
                     <div style={{ fontSize: 10, color: 'var(--text-3)' }}>timeout</div>
                     <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{s.timeout}s</div>
                   </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 52 }}>
                     <div style={{ fontSize: 10, color: 'var(--text-3)' }}>delay</div>
                     <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{Number(s.delay_seconds ?? 3)}s</div>
                   </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 52 }}>
                     <div style={{ fontSize: 10, color: 'var(--text-3)' }}>workers</div>
                     <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{Math.max(1, Number(s.worker_count ?? 1))}</div>
                   </div>

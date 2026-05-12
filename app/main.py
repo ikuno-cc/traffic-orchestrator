@@ -101,6 +101,18 @@ def _find_duplicate_service_name(name: str, exclude_id: Optional[str] = None) ->
     return None
 
 
+def _assert_worker_count_persisted(service_id: str, expected_worker_count: int) -> None:
+    actual = fetch_service_from_supabase(service_id)
+    if not actual:
+        raise HTTPException(502, "Service saved but failed to read it back from Supabase")
+    actual_wc = int(actual.get("worker_count") or 1)
+    if actual_wc != int(expected_worker_count):
+        raise HTTPException(
+            409,
+            "worker_count was not persisted. Add `worker_count` column to Supabase table `orch_services`.",
+        )
+
+
 @app.get("/services")
 def list_services():
     _require_supabase()
@@ -145,6 +157,7 @@ def set_workers_concurrency(update: WorkerConcurrencyUpdate):
     for s in services:
         s["worker_count"] = update.concurrency
         sync_service_to_supabase(s)
+        _assert_worker_count_persisted(str(s.get("id")), update.concurrency)
     return {"updated": True, "target_concurrency": update.concurrency}
 
 
@@ -159,6 +172,7 @@ def create_service(service: ServiceConfig):
         return JSONResponse(status_code=200, content=duplicate)
     payload = service.model_dump()
     sync_service_to_supabase(payload)
+    _assert_worker_count_persisted(service.id, service.worker_count)
     return payload
 
 
@@ -187,6 +201,7 @@ def update_service(service_id: str, service: ServiceConfig):
     service.created_at = existing.get("created_at", service.created_at)
     payload = service.model_dump()
     sync_service_to_supabase(payload)
+    _assert_worker_count_persisted(service_id, service.worker_count)
     return payload
 
 
