@@ -43,8 +43,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.gui
-    expose:
-      - "8000"
+    ports:
+      - "0:8000"
     depends_on:
       api:
         condition: service_healthy
