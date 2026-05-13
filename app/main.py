@@ -292,12 +292,15 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         "delay_seconds": effective_delay,
     }
     upsert_request(record)
+    queue_name = _service_queue_name(req.service_id)
+    _ensure_worker_consumes_queue(queue_name)
     task_record = dict(record)
     task_record["delay_seconds"] = 0
     task = process_dispatch_request_task.apply_async(
         args=[task_record],
         priority=max(0, 10 - int(req.priority)),
         countdown=max(0.0, float(effective_delay)),
+        queue=queue_name,
     )
     update_request_fields(request_id, {"celery_task_id": task.id})
     return JSONResponse(status_code=202, content={"request_id": request_id, "status": "queued", "scene_id": record.get("scene_id")})
@@ -352,12 +355,15 @@ def retry_request(request_id: str):
     if refreshed:
         service = store_get_service(str(refreshed.get("service_id")))
         countdown = float((refreshed.get("delay_seconds") if refreshed.get("delay_seconds") is not None else (service or {}).get("delay_seconds", 3)) or 0)
+        queue_name = _service_queue_name(str(refreshed.get("service_id")))
+        _ensure_worker_consumes_queue(queue_name)
         task_record = dict(refreshed)
         task_record["delay_seconds"] = 0
         task = process_dispatch_request_task.apply_async(
             args=[task_record],
             priority=max(0, 10 - int(refreshed.get("priority", 5))),
             countdown=max(0.0, countdown),
+            queue=queue_name,
         )
         update_request_fields(request_id, {"celery_task_id": task.id})
     return {"request_id": request_id, "status": "queued", "updated": True}
@@ -421,6 +427,19 @@ def _strip_heavy_payload(record: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _service_queue_name(service_id: str) -> str:
+    return f"svc.{service_id}"
+
+
+def _ensure_worker_consumes_queue(queue_name: str) -> None:
+    try:
+        # No-op if already consuming; this lets newly-created service queues work
+        # without requiring worker restart.
+        process_dispatch_request_task.app.control.add_consumer(queue_name, reply=False)
+    except Exception as exc:
+        print(f"[QUEUE] Failed to add consumer for {queue_name}: {exc}")
+
+
 async def _request_cleanup_loop() -> None:
     while True:
         try:
@@ -435,6 +454,13 @@ async def _request_cleanup_loop() -> None:
 @app.on_event("startup")
 async def _on_startup() -> None:
     global _cleanup_task
+    try:
+        for svc in store_list_services():
+            sid = str(svc.get("id") or "")
+            if sid:
+                _ensure_worker_consumes_queue(_service_queue_name(sid))
+    except Exception as exc:
+        print(f"[QUEUE] Startup queue sync failed: {exc}")
     _cleanup_task = asyncio.create_task(_request_cleanup_loop())
 
 
