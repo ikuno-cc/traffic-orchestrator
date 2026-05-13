@@ -49,7 +49,7 @@ if not broker_url:
 if not result_backend:
     raise RuntimeError("Celery result backend is not configured. Set CELERY_RESULT_BACKEND or DATABASE_URL.")
 
-celery_app = Celery("traffic_orch", broker=broker_url, backend=result_backend)
+celery_app = Celery("traffic_orch", broker=broker_url, backend=result_backend, include=["workers.tasks"])
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
