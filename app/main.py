@@ -5,6 +5,7 @@ import uuid
 from typing import Any, Literal, Optional
 
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.responses import JSONResponse
@@ -174,15 +175,15 @@ def create_service(service: ServiceConfig):
     _require_storage()
     existing_by_id = store_get_service(service.id)
     if existing_by_id:
-        return JSONResponse(status_code=200, content=existing_by_id)
+        return JSONResponse(status_code=200, content=jsonable_encoder(existing_by_id))
 
     duplicate_name = _find_duplicate_service_name(service.name)
     if duplicate_name:
-        return JSONResponse(status_code=200, content=duplicate_name)
+        return JSONResponse(status_code=200, content=jsonable_encoder(duplicate_name))
 
     duplicate = _find_duplicate_service(service.url, service.type)
     if duplicate:
-        return JSONResponse(status_code=200, content=duplicate)
+        return JSONResponse(status_code=200, content=jsonable_encoder(duplicate))
     payload = service.model_dump()
     upsert_service(payload)
     _assert_worker_count_persisted(service.id, service.worker_count)
@@ -206,7 +207,7 @@ def update_service(service_id: str, service: ServiceConfig):
         raise HTTPException(404, "Service not found")
     duplicate_name = _find_duplicate_service_name(service.name, exclude_id=service_id)
     if duplicate_name:
-        return JSONResponse(status_code=200, content=duplicate_name)
+        return JSONResponse(status_code=200, content=jsonable_encoder(duplicate_name))
     if _find_duplicate_service(service.url, service.type, exclude_id=service_id):
         raise HTTPException(409, "Service with the same URL and type already exists")
 
