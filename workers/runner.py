@@ -3,7 +3,7 @@ import threading
 import time
 from typing import Dict
 
-from app.supabase_sync import claim_next_queued_request, fetch_services_from_supabase, is_supabase_enabled
+from app.storage import claim_next_queued_request, list_services, is_storage_enabled
 from workers.tasks import process_dispatch_request
 
 POLL_SECONDS = float(os.getenv("WORKER_POLL_SECONDS", "1.0"))
@@ -30,13 +30,13 @@ class ServiceWorker(threading.Thread):
 
 
 def run():
-    if not is_supabase_enabled():
-        raise RuntimeError("Supabase is not configured")
+    if not is_storage_enabled():
+        raise RuntimeError("Postgres storage is not configured")
 
     workers: Dict[str, ServiceWorker] = {}
 
     while True:
-        services = fetch_services_from_supabase()
+        services = list_services()
         desired: Dict[str, int] = {}
         for s in services:
             if not bool(s.get("enabled", True)):
@@ -64,3 +64,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+
