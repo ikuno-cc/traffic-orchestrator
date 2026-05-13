@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 
 import requests as http_requests
 
-from app.supabase_sync import fetch_service_from_supabase, is_storage_enabled, sync_request_to_supabase
+from app.storage import get_service, is_storage_enabled, upsert_request
 from workers.celery_app import celery_app
 
 
@@ -34,7 +34,7 @@ def _update_request(record: dict[str, Any], updates: dict[str, Any]) -> dict[str
     record.update(updates)
     record["updated_at"] = datetime.utcnow().isoformat()
     if is_storage_enabled():
-        sync_request_to_supabase(record)
+        upsert_request(record)
     return record
 
 
@@ -80,7 +80,7 @@ def process_dispatch_request(record: dict[str, Any]) -> dict[str, Any]:
     scene_id = record.get("scene_id")
     metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
 
-    service = fetch_service_from_supabase(service_id)
+    service = get_service(service_id)
     if not service:
         _update_request(record, {"status": "failed", "error": "Service not found"})
         return {"status": "failed", "request_id": request_id, "scene_id": scene_id, "metadata": metadata, "error": "Service not found"}
@@ -758,3 +758,4 @@ def _build_image_edit_multipart_request(
     }
     files = {"image[]": (base_name, file_bytes, content_type)}
     return form_data, files
+

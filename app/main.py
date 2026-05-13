@@ -8,19 +8,18 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.supabase_sync import (
-    delete_request_from_supabase,
-    delete_service_from_supabase,
-    fetch_request_from_supabase,
-    fetch_requests_from_supabase,
-    fetch_service_from_supabase,
-    fetch_services_from_supabase,
+from app.storage import (
+    delete_request as store_delete_request,
+    delete_service as store_delete_service,
+    get_request as store_get_request,
+    get_service as store_get_service,
     is_storage_enabled,
+    list_requests as store_list_requests,
+    list_services as store_list_services,
     storage_backend_name,
-    is_supabase_enabled,
-    sync_request_to_supabase,
-    sync_service_to_supabase,
     update_request_fields,
+    upsert_request,
+    upsert_service,
 )
 from workers.tasks import process_dispatch_request_task
 
@@ -78,14 +77,12 @@ class WorkerConcurrencyUpdate(BaseModel):
 
 def _require_storage() -> None:
     if not is_storage_enabled():
-        if storage_backend_name() == "postgres":
-            raise HTTPException(503, "Postgres storage is not configured")
-        raise HTTPException(503, "Supabase storage is not configured")
+        raise HTTPException(503, "Postgres storage is not configured")
 
 
 def _find_duplicate_service(url: str, service_type: str, exclude_id: Optional[str] = None) -> Optional[dict]:
     normalized_url = url.rstrip("/")
-    for item in fetch_services_from_supabase():
+    for item in store_list_services():
         sid = item.get("id")
         if exclude_id and sid == exclude_id:
             continue
@@ -96,7 +93,7 @@ def _find_duplicate_service(url: str, service_type: str, exclude_id: Optional[st
 
 def _find_duplicate_service_name(name: str, exclude_id: Optional[str] = None) -> Optional[dict]:
     normalized_name = name.strip().lower()
-    for item in fetch_services_from_supabase():
+    for item in store_list_services():
         sid = item.get("id")
         if exclude_id and sid == exclude_id:
             continue
@@ -107,21 +104,21 @@ def _find_duplicate_service_name(name: str, exclude_id: Optional[str] = None) ->
 
 
 def _assert_worker_count_persisted(service_id: str, expected_worker_count: int) -> None:
-    actual = fetch_service_from_supabase(service_id)
+    actual = store_get_service(service_id)
     if not actual:
-        raise HTTPException(502, "Service saved but failed to read it back from Supabase")
+        raise HTTPException(502, "Service saved but failed to read it back from Postgres")
     actual_wc = int(actual.get("worker_count") or 1)
     if actual_wc != int(expected_worker_count):
         raise HTTPException(
             409,
-            "worker_count was not persisted. Add `worker_count` column to Supabase table `orch_services`.",
+            "worker_count was not persisted. Add `worker_count` column to table `orch_services`.",
         )
 
 
 @app.get("/services")
-def list_services():
+def api_list_services():
     _require_storage()
-    return fetch_services_from_supabase()
+    return store_list_services()
 
 
 @app.get("/docs", include_in_schema=False)
@@ -139,7 +136,7 @@ def swagger_ui_redirect():
 @app.get("/workers")
 def get_workers():
     _require_storage()
-    services = fetch_services_from_supabase()
+    services = store_list_services()
     rows = []
     total = 0
     for s in services:
@@ -158,10 +155,10 @@ def get_workers():
 @app.post("/workers/concurrency")
 def set_workers_concurrency(update: WorkerConcurrencyUpdate):
     _require_storage()
-    services = fetch_services_from_supabase()
+    services = store_list_services()
     for s in services:
         s["worker_count"] = update.concurrency
-        sync_service_to_supabase(s)
+        upsert_service(s)
         _assert_worker_count_persisted(str(s.get("id")), update.concurrency)
     return {"updated": True, "target_concurrency": update.concurrency}
 
@@ -176,15 +173,15 @@ def create_service(service: ServiceConfig):
     if duplicate:
         return JSONResponse(status_code=200, content=duplicate)
     payload = service.model_dump()
-    sync_service_to_supabase(payload)
+    upsert_service(payload)
     _assert_worker_count_persisted(service.id, service.worker_count)
     return payload
 
 
 @app.get("/services/{service_id}")
-def get_service(service_id: str):
+def api_get_service(service_id: str):
     _require_storage()
-    service = fetch_service_from_supabase(service_id)
+    service = store_get_service(service_id)
     if not service:
         raise HTTPException(404, "Service not found")
     return service
@@ -193,7 +190,7 @@ def get_service(service_id: str):
 @app.put("/services/{service_id}")
 def update_service(service_id: str, service: ServiceConfig):
     _require_storage()
-    existing = fetch_service_from_supabase(service_id)
+    existing = store_get_service(service_id)
     if not existing:
         raise HTTPException(404, "Service not found")
     duplicate_name = _find_duplicate_service_name(service.name, exclude_id=service_id)
@@ -205,53 +202,48 @@ def update_service(service_id: str, service: ServiceConfig):
     service.id = service_id
     service.created_at = existing.get("created_at", service.created_at)
     payload = service.model_dump()
-    sync_service_to_supabase(payload)
+    upsert_service(payload)
     _assert_worker_count_persisted(service_id, service.worker_count)
     return payload
 
 
 @app.delete("/services/{service_id}")
-def delete_service(service_id: str):
+def api_delete_service(service_id: str):
     _require_storage()
-    if not fetch_service_from_supabase(service_id):
+    if not store_get_service(service_id):
         raise HTTPException(404, "Service not found")
-    if not delete_service_from_supabase(service_id):
-        raise HTTPException(502, "Failed to delete service from Supabase")
+    if not store_delete_service(service_id):
+        raise HTTPException(502, "Failed to delete service from Postgres")
     return {"deleted": service_id}
 
 
 @app.post("/services/{service_id}/pause")
 def pause_service(service_id: str):
     _require_storage()
-    service = fetch_service_from_supabase(service_id)
+    service = store_get_service(service_id)
     if not service:
         raise HTTPException(404, "Service not found")
     service["enabled"] = False
-    sync_service_to_supabase(service)
+    upsert_service(service)
     return {"status": "paused", "service_id": service_id}
 
 
 @app.post("/services/{service_id}/resume")
 def resume_service(service_id: str):
     _require_storage()
-    service = fetch_service_from_supabase(service_id)
+    service = store_get_service(service_id)
     if not service:
         raise HTTPException(404, "Service not found")
     service["enabled"] = True
-    sync_service_to_supabase(service)
+    upsert_service(service)
 
-    paused_reqs = fetch_requests_from_supabase(service_id=service_id, status="paused", limit=1000)
-    failed_reqs = fetch_requests_from_supabase(service_id=service_id, status="failed", limit=1000)
+    paused_reqs = store_list_requests(service_id=service_id, status="paused", limit=1000)
+    failed_reqs = store_list_requests(service_id=service_id, status="failed", limit=1000)
     requeued = 0
     for req in paused_reqs + failed_reqs:
         update_request_fields(
             req["id"],
-            {
-                "status": "queued",
-                "error": None,
-                "retry_count": 0,
-                "updated_at": datetime.utcnow().isoformat(),
-            },
+            {"status": "queued", "error": None, "retry_count": 0, "updated_at": datetime.utcnow().isoformat()},
         )
         requeued += 1
     return {"status": "resumed", "service_id": service_id, "requeued": requeued}
@@ -260,7 +252,7 @@ def resume_service(service_id: str):
 @app.post("/dispatch")
 def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_seconds: Optional[int] = None):
     _require_storage()
-    service = fetch_service_from_supabase(req.service_id)
+    service = store_get_service(req.service_id)
     if not service:
         raise HTTPException(404, "Service not found")
     if not service.get("enabled", True):
@@ -287,7 +279,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         "webhook_url": req.webhook_url,
         "delay_seconds": effective_delay,
     }
-    sync_request_to_supabase(record)
+    upsert_request(record)
     task_record = dict(record)
     task_record["delay_seconds"] = 0
     task = process_dispatch_request_task.apply_async(
@@ -300,18 +292,18 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
 
 
 @app.get("/requests")
-def list_requests(service_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100, include_payload: bool = False):
+def api_list_requests(service_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100, include_payload: bool = False):
     _require_storage()
-    records = fetch_requests_from_supabase(service_id=service_id, status=status, limit=limit)
+    records = store_list_requests(service_id=service_id, status=status, limit=limit)
     if not include_payload:
         records = [_strip_heavy_payload(r) for r in records]
     return records
 
 
 @app.get("/requests/{request_id}")
-def get_request(request_id: str):
+def api_get_request(request_id: str):
     _require_storage()
-    record = fetch_request_from_supabase(request_id)
+    record = store_get_request(request_id)
     if not record:
         raise HTTPException(404, "Request not found")
     return record
@@ -320,7 +312,7 @@ def get_request(request_id: str):
 @app.post("/requests/{request_id}/cancel")
 def cancel_request(request_id: str):
     _require_storage()
-    record = fetch_request_from_supabase(request_id)
+    record = store_get_request(request_id)
     if not record:
         raise HTTPException(404, "Request not found")
     if record.get("status") in {"success", "failed", "cancelled"}:
@@ -332,7 +324,7 @@ def cancel_request(request_id: str):
 @app.post("/requests/{request_id}/retry")
 def retry_request(request_id: str):
     _require_storage()
-    record = fetch_request_from_supabase(request_id)
+    record = store_get_request(request_id)
     if not record:
         raise HTTPException(404, "Request not found")
     if record.get("status") in {"running", "queued"}:
@@ -342,16 +334,11 @@ def retry_request(request_id: str):
 
     update_request_fields(
         request_id,
-        {
-            "status": "queued",
-            "error": None,
-            "retry_count": 0,
-            "updated_at": datetime.utcnow().isoformat(),
-        },
+        {"status": "queued", "error": None, "retry_count": 0, "updated_at": datetime.utcnow().isoformat()},
     )
-    refreshed = fetch_request_from_supabase(request_id)
+    refreshed = store_get_request(request_id)
     if refreshed:
-        service = fetch_service_from_supabase(str(refreshed.get("service_id")))
+        service = store_get_service(str(refreshed.get("service_id")))
         countdown = float((refreshed.get("delay_seconds") if refreshed.get("delay_seconds") is not None else (service or {}).get("delay_seconds", 3)) or 0)
         task_record = dict(refreshed)
         task_record["delay_seconds"] = 0
@@ -365,26 +352,24 @@ def retry_request(request_id: str):
 
 
 @app.delete("/requests/{request_id}")
-def delete_request(request_id: str):
+def api_delete_request(request_id: str):
     _require_storage()
-    if not delete_request_from_supabase(request_id):
-        raise HTTPException(502, "Failed to delete request from Supabase")
+    if not store_delete_request(request_id):
+        raise HTTPException(502, "Failed to delete request from Postgres")
     return {"deleted": request_id}
 
 
 @app.get("/stats")
 def stats():
     _require_storage()
-    records = fetch_requests_from_supabase(limit=1000)
-    services = fetch_services_from_supabase()
-
+    records = store_list_requests(limit=1000)
+    services = store_list_services()
     by_status = {}
     by_service = {}
     for record in records:
         by_status[record.get("status", "unknown")] = by_status.get(record.get("status", "unknown"), 0) + 1
         sname = str(record.get("service_name") or record.get("service_id") or "unknown")
         by_service[sname] = by_service.get(sname, 0) + 1
-
     paused_services = [s.get("id") for s in services if not bool(s.get("enabled", True))]
     return {
         "total_requests": len(records),
@@ -402,7 +387,6 @@ def health():
         "time": datetime.utcnow().isoformat(),
         "storage_backend": storage_backend_name(),
         "storage_enabled": is_storage_enabled(),
-        "supabase_enabled": is_supabase_enabled(),
     }
 
 
