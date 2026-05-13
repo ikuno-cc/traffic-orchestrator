@@ -346,3 +346,55 @@ def delete_completed_requests_older_than(hours: float, statuses: Optional[list[s
                 (statuses, float(hours)),
             )
             return int(cur.rowcount or 0)
+
+
+def try_start_request_with_service_limit(request_id: str, service_id: str, max_running: int) -> bool:
+    """
+    Atomically mark request as running if current running count for the same service
+    is below max_running. Uses advisory transaction lock per service to serialize
+    the check+update critical section.
+    """
+    conn = _pg_conn()
+    if conn is None:
+        return False
+    max_running = max(1, int(max_running))
+    table = f'"{PG_SCHEMA}"."{REQUESTS_TABLE}"'
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_xact_lock(hashtext(%s)) AS locked", (f"svc:{service_id}",))
+            row = cur.fetchone() or {}
+            if not bool(row.get("locked")):
+                return False
+
+            cur.execute(
+                f"SELECT COUNT(*) AS c FROM {table} WHERE service_id=%s AND status='running'",
+                (service_id,),
+            )
+            running_count = int((cur.fetchone() or {}).get("c") or 0)
+            if running_count >= max_running:
+                return False
+
+            cur.execute(
+                f"SELECT info FROM {table} WHERE id=%s LIMIT 1",
+                (request_id,),
+            )
+            req_row = cur.fetchone()
+            if not req_row:
+                return False
+
+            info = req_row.get("info") or {}
+            if isinstance(info, str):
+                try:
+                    info = json.loads(info)
+                except Exception:
+                    info = {}
+            if not isinstance(info, dict):
+                info = {}
+            info["status"] = "running"
+            info["updated_at"] = datetime.utcnow().isoformat()
+
+            cur.execute(
+                f"UPDATE {table} SET status='running', info=%s::jsonb WHERE id=%s AND status IN ('queued','retrying')",
+                (json.dumps(info, default=str), request_id),
+            )
+            return int(cur.rowcount or 0) > 0

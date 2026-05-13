@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 
 import requests as http_requests
 
-from app.storage import get_service, is_storage_enabled, upsert_request
+from app.storage import get_service, is_storage_enabled, try_start_request_with_service_limit, upsert_request
 from workers.celery_app import celery_app
 
 
@@ -16,9 +16,23 @@ class NonRetryableDispatchError(Exception):
     """Raised for request failures that should not be retried."""
 
 
-@celery_app.task(name="workers.tasks.process_dispatch_request_task")
-def process_dispatch_request_task(record: dict[str, Any]) -> dict[str, Any]:
-    return process_dispatch_request(record)
+@celery_app.task(bind=True, name="workers.tasks.process_dispatch_request_task", max_retries=None)
+def process_dispatch_request_task(self, record: dict[str, Any]) -> dict[str, Any]:
+    service_id = str(record.get("service_id") or "")
+    request_id = str(record.get("id") or "")
+    service = get_service(service_id) if service_id else None
+    if not service:
+        return process_dispatch_request(record)
+
+    service_limit = max(1, int(service.get("worker_count") or 1))
+    acquired = try_start_request_with_service_limit(request_id, service_id, service_limit)
+    if not acquired:
+        raise self.retry(countdown=2)
+
+    # Status is already set to running by the atomic limiter gate.
+    record_copy = dict(record)
+    record_copy["status"] = "running"
+    return process_dispatch_request(record_copy)
 
 
 def _resolve_url(url: Optional[str]) -> Optional[str]:
@@ -90,7 +104,8 @@ def process_dispatch_request(record: dict[str, Any]) -> dict[str, Any]:
 
     service_url = _resolve_url(service.get("url"))
     webhook_url = _resolve_url(webhook_url)
-    _update_request(record, {"status": "running", "error": None})
+    if record.get("status") != "running":
+        _update_request(record, {"status": "running", "error": None})
 
     try:
         if delay_seconds > 0:
