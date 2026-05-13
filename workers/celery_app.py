@@ -24,12 +24,24 @@ def _normalize_postgres_url(raw_url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def _ensure_psycopg_driver(url: str, prefix: str) -> str:
+    if not url:
+        return url
+    if url.startswith(f"{prefix}postgresql+psycopg://"):
+        return url
+    if url.startswith(f"{prefix}postgresql://"):
+        return f"{prefix}postgresql+psycopg://{url[len(prefix + 'postgresql://'):]}"
+    return url
+
+
 DATABASE_URL = _normalize_postgres_url(os.getenv("DATABASE_URL", "").strip())
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "").strip()
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "").strip()
 
 broker_url = CELERY_BROKER_URL or (f"sqla+{DATABASE_URL}" if DATABASE_URL else "")
 result_backend = CELERY_RESULT_BACKEND or (f"db+{DATABASE_URL}" if DATABASE_URL else "")
+broker_url = _ensure_psycopg_driver(broker_url, "sqla+")
+result_backend = _ensure_psycopg_driver(result_backend, "db+")
 
 if not broker_url:
     raise RuntimeError("Celery broker is not configured. Set CELERY_BROKER_URL or DATABASE_URL.")
