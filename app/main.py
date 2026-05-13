@@ -1,4 +1,6 @@
 from datetime import datetime
+import asyncio
+import os
 import uuid
 from typing import Any, Literal, Optional
 
@@ -9,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.storage import (
+    delete_completed_requests_older_than,
     delete_request as store_delete_request,
     delete_service as store_delete_service,
     get_request as store_get_request,
@@ -34,6 +37,9 @@ app.add_middleware(
 )
 
 EXTERNAL_API_PREFIX = ""
+REQUEST_RETENTION_HOURS = float(os.getenv("REQUEST_RETENTION_HOURS", "5"))
+REQUEST_CLEANUP_INTERVAL_SECONDS = int(os.getenv("REQUEST_CLEANUP_INTERVAL_SECONDS", "600"))
+_cleanup_task: Optional[asyncio.Task] = None
 
 
 class ServiceConfig(BaseModel):
@@ -407,3 +413,31 @@ def _strip_heavy_payload(record: dict[str, Any]) -> dict[str, Any]:
             payload_copy["multipart"] = mp_copy
         out["payload"] = payload_copy
     return out
+
+
+async def _request_cleanup_loop() -> None:
+    while True:
+        try:
+            removed = delete_completed_requests_older_than(REQUEST_RETENTION_HOURS)
+            if removed:
+                print(f"[CLEANUP] Deleted {removed} completed requests older than {REQUEST_RETENTION_HOURS}h")
+        except Exception as exc:
+            print(f"[CLEANUP] Failed: {exc}")
+        await asyncio.sleep(max(30, REQUEST_CLEANUP_INTERVAL_SECONDS))
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    global _cleanup_task
+    _cleanup_task = asyncio.create_task(_request_cleanup_loop())
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    global _cleanup_task
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
