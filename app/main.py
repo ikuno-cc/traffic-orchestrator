@@ -172,9 +172,14 @@ def set_workers_concurrency(update: WorkerConcurrencyUpdate):
 @app.post("/services", status_code=201)
 def create_service(service: ServiceConfig):
     _require_storage()
+    existing_by_id = store_get_service(service.id)
+    if existing_by_id:
+        return JSONResponse(status_code=200, content=existing_by_id)
+
     duplicate_name = _find_duplicate_service_name(service.name)
     if duplicate_name:
         return JSONResponse(status_code=200, content=duplicate_name)
+
     duplicate = _find_duplicate_service(service.url, service.type)
     if duplicate:
         return JSONResponse(status_code=200, content=duplicate)
