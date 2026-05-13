@@ -40,6 +40,10 @@ app.add_middleware(
 EXTERNAL_API_PREFIX = ""
 REQUEST_RETENTION_HOURS = float(os.getenv("REQUEST_RETENTION_HOURS", "5"))
 REQUEST_CLEANUP_INTERVAL_SECONDS = int(os.getenv("REQUEST_CLEANUP_INTERVAL_SECONDS", "600"))
+# When True, fall back to the default 'celery' queue if the worker hasn't confirmed
+# it is consuming a service-specific queue. Protects against rollout races.
+WORKER_FALLBACK_QUEUE_ENABLED = os.getenv("WORKER_FALLBACK_QUEUE_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+DEFAULT_WORKER_QUEUE = os.getenv("DEFAULT_WORKER_QUEUE", "celery")
 _cleanup_task: Optional[asyncio.Task] = None
 
 
@@ -292,8 +296,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         "delay_seconds": effective_delay,
     }
     upsert_request(record)
-    queue_name = _service_queue_name(req.service_id)
-    _ensure_worker_consumes_queue(queue_name)
+    queue_name = _resolve_dispatch_queue(req.service_id)
     task_record = dict(record)
     task_record["delay_seconds"] = 0
     task = process_dispatch_request_task.apply_async(
@@ -302,7 +305,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         countdown=max(0.0, float(effective_delay)),
         queue=queue_name,
     )
-    update_request_fields(request_id, {"celery_task_id": task.id})
+    update_request_fields(request_id, {"celery_task_id": task.id, "queue": queue_name})
     return JSONResponse(status_code=202, content={"request_id": request_id, "status": "queued", "scene_id": record.get("scene_id")})
 
 
@@ -355,8 +358,7 @@ def retry_request(request_id: str):
     if refreshed:
         service = store_get_service(str(refreshed.get("service_id")))
         countdown = float((refreshed.get("delay_seconds") if refreshed.get("delay_seconds") is not None else (service or {}).get("delay_seconds", 3)) or 0)
-        queue_name = _service_queue_name(str(refreshed.get("service_id")))
-        _ensure_worker_consumes_queue(queue_name)
+        queue_name = _resolve_dispatch_queue(str(refreshed.get("service_id")))
         task_record = dict(refreshed)
         task_record["delay_seconds"] = 0
         task = process_dispatch_request_task.apply_async(
@@ -365,7 +367,7 @@ def retry_request(request_id: str):
             countdown=max(0.0, countdown),
             queue=queue_name,
         )
-        update_request_fields(request_id, {"celery_task_id": task.id})
+        update_request_fields(request_id, {"celery_task_id": task.id, "queue": queue_name})
     return {"request_id": request_id, "status": "queued", "updated": True}
 
 
@@ -431,13 +433,49 @@ def _service_queue_name(service_id: str) -> str:
     return f"svc.{service_id}"
 
 
-def _ensure_worker_consumes_queue(queue_name: str) -> None:
+def _ensure_worker_consumes_queue(queue_name: str) -> bool:
+    """
+    Tell the running worker to start consuming *queue_name*.
+    Uses reply=True with a short timeout so we can detect whether any worker
+    actually acknowledged the instruction.
+
+    Returns True if at least one worker confirmed, False otherwise.
+    Failures are logged but never propagate — dispatch continues either way.
+    """
     try:
-        # No-op if already consuming; this lets newly-created service queues work
-        # without requiring worker restart.
-        process_dispatch_request_task.app.control.add_consumer(queue_name, reply=False)
+        replies = process_dispatch_request_task.app.control.add_consumer(
+            queue_name,
+            reply=True,
+            timeout=2.0,
+        )
+        # replies is a list of per-worker dicts; non-empty means at least one worker responded.
+        confirmed = bool(replies)
+        if confirmed:
+            print(f"[QUEUE] Worker confirmed consuming {queue_name} (replies={len(replies)})")
+        else:
+            print(f"[QUEUE] No worker replied to add_consumer({queue_name}) — worker may still be starting")
+        return confirmed
     except Exception as exc:
-        print(f"[QUEUE] Failed to add consumer for {queue_name}: {exc}")
+        print(f"[QUEUE] add_consumer({queue_name}) raised: {exc}")
+        return False
+
+
+def _resolve_dispatch_queue(service_id: str) -> str:
+    """
+    Return the queue to use for dispatching a task.
+    Attempts to subscribe the worker to the service-specific queue first.
+    Falls back to the default queue when WORKER_FALLBACK_QUEUE_ENABLED is set
+    and no worker confirmed the subscription (e.g. during a rolling restart).
+    """
+    queue_name = _service_queue_name(service_id)
+    confirmed = _ensure_worker_consumes_queue(queue_name)
+    if not confirmed and WORKER_FALLBACK_QUEUE_ENABLED:
+        print(
+            f"[QUEUE] Falling back to '{DEFAULT_WORKER_QUEUE}' for service {service_id} "
+            "— worker will pick up the task once it subscribes to the service queue."
+        )
+        return DEFAULT_WORKER_QUEUE
+    return queue_name
 
 
 async def _request_cleanup_loop() -> None:
@@ -458,6 +496,7 @@ async def _on_startup() -> None:
         for svc in store_list_services():
             sid = str(svc.get("id") or "")
             if sid:
+                # reply=True at startup so we get confirmation in logs.
                 _ensure_worker_consumes_queue(_service_queue_name(sid))
     except Exception as exc:
         print(f"[QUEUE] Startup queue sync failed: {exc}")

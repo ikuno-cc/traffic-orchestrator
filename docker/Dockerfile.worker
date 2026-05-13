@@ -7,5 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 COPY workers/ ./workers/
+COPY docker/entrypoint_worker.sh /entrypoint_worker.sh
+RUN chmod +x /entrypoint_worker.sh
 
-CMD ["celery", "-A", "workers.celery_app:celery_app", "worker", "--loglevel=info"]
+CMD ["/entrypoint_worker.sh"]
