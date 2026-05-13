@@ -49,8 +49,11 @@ if not broker_url:
 if not result_backend:
     raise RuntimeError("Celery result backend is not configured. Set CELERY_RESULT_BACKEND or DATABASE_URL.")
 
+_worker_concurrency_env = os.getenv("WORKER_CONCURRENCY", "").strip()
+_worker_concurrency = int(_worker_concurrency_env) if _worker_concurrency_env.isdigit() else None
+
 celery_app = Celery("traffic_orch", broker=broker_url, backend=result_backend, include=["workers.tasks"])
-celery_app.conf.update(
+_conf: dict = dict(
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
@@ -63,3 +66,8 @@ celery_app.conf.update(
     # subscribed to a service-specific svc.<id> queue.
     task_default_queue="celery",
 )
+if _worker_concurrency is not None:
+    # Honour WORKER_CONCURRENCY env var so the physical process pool size matches
+    # the total configured worker_count across all services, not just the CPU count.
+    _conf["worker_concurrency"] = _worker_concurrency
+celery_app.conf.update(**_conf)
