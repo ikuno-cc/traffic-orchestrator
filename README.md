@@ -5,14 +5,14 @@ Traffic Orch is a traffic and request orchestration platform used to route jobs 
 ## What It Contains
 
 - `app/`: FastAPI backend (service management, dispatch API, stats)
-- `workers/`: Supabase-backed worker logic for async dispatch execution
+- `workers/`: Celery worker tasks for async dispatch execution
 - `frontend/`: React/Vite dashboard for operators
 - `docker/`: container definitions and compose file
 - `scrapling_service/`: auxiliary scraping service container assets
 
 ## Runtime Architecture
 
-- UI -> API -> Supabase queue table -> service-specific workers -> external target service
+- UI -> API -> Postgres state store + Celery queue -> service-specific workers -> external target service
 - Optional webhook callbacks after job completion
 
 ## Quick Start (Docker)
@@ -54,6 +54,6 @@ npm run dev
 
 ## Troubleshooting
 
-- If dispatches remain queued: verify Supabase connectivity and worker logs.
+- If dispatches remain queued: verify Celery worker logs and broker/backend connectivity.
 - If UI cannot call API: verify API URL settings and Docker network reachability.
 - If external calls fail: validate registered service URL/headers/timeout.

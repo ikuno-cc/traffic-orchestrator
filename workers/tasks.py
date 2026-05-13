@@ -8,11 +8,17 @@ from urllib.parse import unquote, urlparse
 
 import requests as http_requests
 
-from app.supabase_sync import fetch_service_from_supabase, is_supabase_enabled, sync_request_to_supabase
+from app.supabase_sync import fetch_service_from_supabase, is_storage_enabled, sync_request_to_supabase
+from workers.celery_app import celery_app
 
 
 class NonRetryableDispatchError(Exception):
     """Raised for request failures that should not be retried."""
+
+
+@celery_app.task(name="workers.tasks.process_dispatch_request_task")
+def process_dispatch_request_task(record: dict[str, Any]) -> dict[str, Any]:
+    return process_dispatch_request(record)
 
 
 def _resolve_url(url: Optional[str]) -> Optional[str]:
@@ -27,7 +33,7 @@ def _resolve_url(url: Optional[str]) -> Optional[str]:
 def _update_request(record: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     record.update(updates)
     record["updated_at"] = datetime.utcnow().isoformat()
-    if is_supabase_enabled():
+    if is_storage_enabled():
         sync_request_to_supabase(record)
     return record
 
