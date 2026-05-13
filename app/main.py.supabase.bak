@@ -15,8 +15,6 @@ from app.supabase_sync import (
     fetch_requests_from_supabase,
     fetch_service_from_supabase,
     fetch_services_from_supabase,
-    is_storage_enabled,
-    storage_backend_name,
     is_supabase_enabled,
     sync_request_to_supabase,
     sync_service_to_supabase,
@@ -75,11 +73,9 @@ class WorkerConcurrencyUpdate(BaseModel):
     concurrency: int = Field(ge=1, le=64)
 
 
-def _require_storage() -> None:
-    if not is_storage_enabled():
-        if storage_backend_name() == "postgres":
-            raise HTTPException(503, "Postgres storage is not configured")
-        raise HTTPException(503, "Supabase storage is not configured")
+def _require_supabase() -> None:
+    if not is_supabase_enabled():
+        raise HTTPException(503, "Supabase is not configured")
 
 
 def _find_duplicate_service(url: str, service_type: str, exclude_id: Optional[str] = None) -> Optional[dict]:
@@ -119,7 +115,7 @@ def _assert_worker_count_persisted(service_id: str, expected_worker_count: int) 
 
 @app.get("/services")
 def list_services():
-    _require_storage()
+    _require_supabase()
     return fetch_services_from_supabase()
 
 
@@ -137,7 +133,7 @@ def swagger_ui_redirect():
 
 @app.get("/workers")
 def get_workers():
-    _require_storage()
+    _require_supabase()
     services = fetch_services_from_supabase()
     rows = []
     total = 0
@@ -156,7 +152,7 @@ def get_workers():
 
 @app.post("/workers/concurrency")
 def set_workers_concurrency(update: WorkerConcurrencyUpdate):
-    _require_storage()
+    _require_supabase()
     services = fetch_services_from_supabase()
     for s in services:
         s["worker_count"] = update.concurrency
@@ -167,7 +163,7 @@ def set_workers_concurrency(update: WorkerConcurrencyUpdate):
 
 @app.post("/services", status_code=201)
 def create_service(service: ServiceConfig):
-    _require_storage()
+    _require_supabase()
     duplicate_name = _find_duplicate_service_name(service.name)
     if duplicate_name:
         return JSONResponse(status_code=200, content=duplicate_name)
@@ -182,7 +178,7 @@ def create_service(service: ServiceConfig):
 
 @app.get("/services/{service_id}")
 def get_service(service_id: str):
-    _require_storage()
+    _require_supabase()
     service = fetch_service_from_supabase(service_id)
     if not service:
         raise HTTPException(404, "Service not found")
@@ -191,7 +187,7 @@ def get_service(service_id: str):
 
 @app.put("/services/{service_id}")
 def update_service(service_id: str, service: ServiceConfig):
-    _require_storage()
+    _require_supabase()
     existing = fetch_service_from_supabase(service_id)
     if not existing:
         raise HTTPException(404, "Service not found")
@@ -211,7 +207,7 @@ def update_service(service_id: str, service: ServiceConfig):
 
 @app.delete("/services/{service_id}")
 def delete_service(service_id: str):
-    _require_storage()
+    _require_supabase()
     if not fetch_service_from_supabase(service_id):
         raise HTTPException(404, "Service not found")
     if not delete_service_from_supabase(service_id):
@@ -221,7 +217,7 @@ def delete_service(service_id: str):
 
 @app.post("/services/{service_id}/pause")
 def pause_service(service_id: str):
-    _require_storage()
+    _require_supabase()
     service = fetch_service_from_supabase(service_id)
     if not service:
         raise HTTPException(404, "Service not found")
@@ -232,7 +228,7 @@ def pause_service(service_id: str):
 
 @app.post("/services/{service_id}/resume")
 def resume_service(service_id: str):
-    _require_storage()
+    _require_supabase()
     service = fetch_service_from_supabase(service_id)
     if not service:
         raise HTTPException(404, "Service not found")
@@ -258,7 +254,7 @@ def resume_service(service_id: str):
 
 @app.post("/dispatch")
 def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_seconds: Optional[int] = None):
-    _require_storage()
+    _require_supabase()
     service = fetch_service_from_supabase(req.service_id)
     if not service:
         raise HTTPException(404, "Service not found")
@@ -292,7 +288,7 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
 
 @app.get("/requests")
 def list_requests(service_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100, include_payload: bool = False):
-    _require_storage()
+    _require_supabase()
     records = fetch_requests_from_supabase(service_id=service_id, status=status, limit=limit)
     if not include_payload:
         records = [_strip_heavy_payload(r) for r in records]
@@ -301,7 +297,7 @@ def list_requests(service_id: Optional[str] = None, status: Optional[str] = None
 
 @app.get("/requests/{request_id}")
 def get_request(request_id: str):
-    _require_storage()
+    _require_supabase()
     record = fetch_request_from_supabase(request_id)
     if not record:
         raise HTTPException(404, "Request not found")
@@ -310,7 +306,7 @@ def get_request(request_id: str):
 
 @app.post("/requests/{request_id}/cancel")
 def cancel_request(request_id: str):
-    _require_storage()
+    _require_supabase()
     record = fetch_request_from_supabase(request_id)
     if not record:
         raise HTTPException(404, "Request not found")
@@ -322,7 +318,7 @@ def cancel_request(request_id: str):
 
 @app.post("/requests/{request_id}/retry")
 def retry_request(request_id: str):
-    _require_storage()
+    _require_supabase()
     record = fetch_request_from_supabase(request_id)
     if not record:
         raise HTTPException(404, "Request not found")
@@ -345,7 +341,7 @@ def retry_request(request_id: str):
 
 @app.delete("/requests/{request_id}")
 def delete_request(request_id: str):
-    _require_storage()
+    _require_supabase()
     if not delete_request_from_supabase(request_id):
         raise HTTPException(502, "Failed to delete request from Supabase")
     return {"deleted": request_id}
@@ -353,7 +349,7 @@ def delete_request(request_id: str):
 
 @app.get("/stats")
 def stats():
-    _require_storage()
+    _require_supabase()
     records = fetch_requests_from_supabase(limit=1000)
     services = fetch_services_from_supabase()
 
@@ -376,13 +372,7 @@ def stats():
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "time": datetime.utcnow().isoformat(),
-        "storage_backend": storage_backend_name(),
-        "storage_enabled": is_storage_enabled(),
-        "supabase_enabled": is_supabase_enabled(),
-    }
+    return {"status": "ok", "time": datetime.utcnow().isoformat(), "supabase_enabled": is_supabase_enabled()}
 
 
 @app.post("/sink")
