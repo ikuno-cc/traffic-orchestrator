@@ -3,7 +3,7 @@ import os
 import time
 from datetime import datetime
 from typing import Any, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 
 import requests
 
@@ -26,7 +26,21 @@ REQUESTS_TABLE = os.getenv("SUPABASE_REQUESTS_TABLE", "orch_requests")
 SUPABASE_SCHEMA = os.getenv("SUPABASE_SCHEMA", "public")
 
 DATA_BACKEND = os.getenv("DATA_BACKEND", "supabase").strip().lower()
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+def _normalize_database_url(raw_url: str) -> str:
+    if not raw_url:
+        return raw_url
+    raw_url = raw_url.strip().strip('"').strip("'")
+    if raw_url.startswith("postgres://"):
+        raw_url = "postgresql://" + raw_url[len("postgres://") :]
+    parts = urlsplit(raw_url)
+    if not parts.password or "%" in parts.password:
+        return raw_url
+    encoded_password = quote(parts.password, safe="")
+    netloc = parts.netloc.replace(f":{parts.password}@", f":{encoded_password}@")
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+DATABASE_URL = _normalize_database_url(os.getenv("DATABASE_URL", ""))
 
 
 def storage_backend_name() -> str:
