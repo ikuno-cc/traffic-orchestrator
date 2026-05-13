@@ -59,4 +59,7 @@ celery_app.conf.update(
     task_track_started=True,
     worker_prefetch_multiplier=1,
     task_acks_late=True,
+    # Default queue used as a rollout-safe fallback when a worker has not yet
+    # subscribed to a service-specific svc.<id> queue.
+    task_default_queue="celery",
 )
