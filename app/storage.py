@@ -329,3 +329,20 @@ def claim_next_queued_request(service_id: str) -> Optional[dict[str, Any]]:
                 (json.dumps(record, default=str), row["id"]),
             )
             return record
+
+
+def delete_completed_requests_older_than(hours: float, statuses: Optional[list[str]] = None) -> int:
+    conn = _pg_conn()
+    if conn is None:
+        return 0
+    statuses = statuses or ["success", "failed", "cancelled"]
+    if not statuses:
+        return 0
+    table = f'"{PG_SCHEMA}"."{REQUESTS_TABLE}"'
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {table} WHERE status = ANY(%s) AND created_at < (NOW() - (%s * INTERVAL '1 hour'))",
+                (statuses, float(hours)),
+            )
+            return int(cur.rowcount or 0)
