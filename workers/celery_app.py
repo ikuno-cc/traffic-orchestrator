@@ -7,6 +7,13 @@ from celery import Celery
 def _normalize_postgres_url(raw_url: str) -> str:
     if not raw_url:
         return raw_url
+    raw_url = raw_url.strip().strip('"').strip("'")
+    if raw_url.startswith("sqla+postgres://"):
+        raw_url = "sqla+postgresql://" + raw_url[len("sqla+postgres://") :]
+    elif raw_url.startswith("db+postgres://"):
+        raw_url = "db+postgresql://" + raw_url[len("db+postgres://") :]
+    elif raw_url.startswith("postgres://"):
+        raw_url = "postgresql://" + raw_url[len("postgres://") :]
     parts = urlsplit(raw_url)
     if not parts.password:
         return raw_url
@@ -41,4 +48,3 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_acks_late=True,
 )
-
