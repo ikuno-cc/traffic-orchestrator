@@ -4,6 +4,10 @@ services:
       context: .
       dockerfile: docker/Dockerfile.api
     environment:
+      - DATA_BACKEND=${DATA_BACKEND:-postgres}
+      - DATABASE_URL=${DATABASE_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-}
       - SUPABASE_PROJECT_REF=${SUPABASE_PROJECT_REF}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SECRET_KEY=${SUPABASE_SECRET_KEY}
@@ -26,14 +30,16 @@ services:
       context: .
       dockerfile: docker/Dockerfile.worker
     environment:
+      - DATA_BACKEND=${DATA_BACKEND:-postgres}
+      - DATABASE_URL=${DATABASE_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-}
       - SUPABASE_PROJECT_REF=${SUPABASE_PROJECT_REF}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SECRET_KEY=${SUPABASE_SECRET_KEY}
       - SUPABASE_SCHEMA=${SUPABASE_SCHEMA:-public}
       - SUPABASE_SERVICES_TABLE=${SUPABASE_SERVICES_TABLE:-orch_services}
       - SUPABASE_REQUESTS_TABLE=${SUPABASE_REQUESTS_TABLE:-orch_requests}
-      - WORKER_POLL_SECONDS=${WORKER_POLL_SECONDS:-1.0}
-      - WORKER_CONFIG_REFRESH_SECONDS=${WORKER_CONFIG_REFRESH_SECONDS:-5.0}
     depends_on:
       api:
         condition: service_healthy

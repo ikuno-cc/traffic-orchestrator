@@ -22,6 +22,7 @@ from app.supabase_sync import (
     sync_service_to_supabase,
     update_request_fields,
 )
+from workers.tasks import process_dispatch_request_task
 
 app = FastAPI(title="Traffic Orchestrator", version="2.0.0", docs_url=None)
 
@@ -146,8 +147,8 @@ def get_workers():
         total += wc
         rows.append({"service_id": s.get("id"), "service_name": s.get("name"), "workers": wc, "enabled": bool(s.get("enabled", True))})
     return {
-        "mode": "supabase-queues",
-        "online_workers": total,
+        "mode": "celery",
+        "online_workers": None,
         "total_concurrency": total,
         "configured_concurrency": total,
         "workers": rows,
@@ -287,6 +288,14 @@ def dispatch(req: DispatchRequest, wait_for_result: bool = False, timeout_second
         "delay_seconds": effective_delay,
     }
     sync_request_to_supabase(record)
+    task_record = dict(record)
+    task_record["delay_seconds"] = 0
+    task = process_dispatch_request_task.apply_async(
+        args=[task_record],
+        priority=max(0, 10 - int(req.priority)),
+        countdown=max(0.0, float(effective_delay)),
+    )
+    update_request_fields(request_id, {"celery_task_id": task.id})
     return JSONResponse(status_code=202, content={"request_id": request_id, "status": "queued", "scene_id": record.get("scene_id")})
 
 
@@ -340,6 +349,18 @@ def retry_request(request_id: str):
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
+    refreshed = fetch_request_from_supabase(request_id)
+    if refreshed:
+        service = fetch_service_from_supabase(str(refreshed.get("service_id")))
+        countdown = float((refreshed.get("delay_seconds") if refreshed.get("delay_seconds") is not None else (service or {}).get("delay_seconds", 3)) or 0)
+        task_record = dict(refreshed)
+        task_record["delay_seconds"] = 0
+        task = process_dispatch_request_task.apply_async(
+            args=[task_record],
+            priority=max(0, 10 - int(refreshed.get("priority", 5))),
+            countdown=max(0.0, countdown),
+        )
+        update_request_fields(request_id, {"celery_task_id": task.id})
     return {"request_id": request_id, "status": "queued", "updated": True}
 
 
