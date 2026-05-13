@@ -1,22 +1,23 @@
 #!/bin/sh
 # entrypoint_worker.sh
-# Builds an explicit Celery queue list from all enabled services in Postgres,
-# then starts the worker subscribed to every queue from boot — no add_consumer race.
+# 1. Queries Postgres for all enabled services to build the explicit -Q queue list.
+# 2. Sums their worker_count to set --concurrency, overriding Celery's CPU-core default.
+# This prevents tasks stalling due to queue-subscription races or concurrency caps.
 
 set -e
 
 # Always include the default queue so tasks dispatched before services exist aren't lost.
 QUEUES="celery"
 
-# Try to fetch service IDs from Postgres. Failures are non-fatal — we fall back to
-# the default queue and let add_consumer() handle the rest at runtime.
-if [ -n "$DATABASE_URL" ]; then
-    # Normalise postgres:// -> postgresql://
-    PG_URL=$(echo "$DATABASE_URL" | sed 's|^postgres://|postgresql://|')
-    SCHEMA="${PG_SCHEMA:-public}"
-    TABLE="${SERVICES_TABLE:-orch_services}"
+# Celery defaults --concurrency to CPU count; we need it to match the total
+# configured worker_count across all services.  Floor at 1.
+CONCURRENCY="${WORKER_CONCURRENCY:-}"   # allow hard override via env
 
-    SVC_IDS=$(python3 - <<'PYEOF'
+if [ -n "$DATABASE_URL" ]; then
+    # Run a single Python snippet that returns two space-separated lines:
+    #   line 1: space-separated service IDs
+    #   line 2: total worker_count sum
+    PY_OUTPUT=$(python3 - <<'PYEOF'
 import os, sys
 try:
     import psycopg
@@ -24,30 +25,48 @@ try:
     url = os.environ.get("DATABASE_URL", "").strip().strip('"').strip("'")
     url = url.replace("postgres://", "postgresql://", 1)
     schema = os.environ.get("PG_SCHEMA", "public")
-    table = os.environ.get("SERVICES_TABLE", "orch_services")
+    table  = os.environ.get("SERVICES_TABLE", "orch_services")
     with psycopg.connect(url, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f'SELECT id FROM "{schema}"."{table}" WHERE enabled = true'
+                f'SELECT id, worker_count FROM "{schema}"."{table}" WHERE enabled = true'
             )
             rows = cur.fetchall()
-    ids = [str(r["id"]) for r in rows if r.get("id")]
-    print(" ".join(ids))
+    ids   = [str(r["id"]) for r in rows if r.get("id")]
+    total = sum(max(1, int(r.get("worker_count") or 1)) for r in rows)
+    print(" ".join(ids))   # line 1
+    print(str(total))      # line 2
 except Exception as exc:
     print(f"[QUEUE-INIT] Could not query services: {exc}", file=sys.stderr)
-    print("")
+    print("")   # line 1 empty  → no service queues added
+    print("4")  # line 2 default
 PYEOF
     )
+
+    SVC_IDS=$(echo "$PY_OUTPUT"  | sed -n '1p')
+    DB_CONCURRENCY=$(echo "$PY_OUTPUT" | sed -n '2p')
 
     for sid in $SVC_IDS; do
         QUEUES="$QUEUES,svc.$sid"
     done
+
+    # Use DB value unless operator already set WORKER_CONCURRENCY env var.
+    if [ -z "$CONCURRENCY" ]; then
+        CONCURRENCY="$DB_CONCURRENCY"
+    fi
 fi
 
-echo "[QUEUE-INIT] Starting worker consuming queues: $QUEUES"
+# Final safety floor
+CONCURRENCY="${CONCURRENCY:-4}"
+if [ "$CONCURRENCY" -lt 1 ] 2>/dev/null; then
+    CONCURRENCY=1
+fi
+
+echo "[QUEUE-INIT] Starting worker | queues=$QUEUES | concurrency=$CONCURRENCY"
 
 exec celery \
     -A workers.celery_app:celery_app \
     worker \
     --loglevel=info \
+    --concurrency="$CONCURRENCY" \
     -Q "$QUEUES"
