@@ -16,6 +16,9 @@ class NonRetryableDispatchError(Exception):
     """Raised for request failures that should not be retried."""
 
 
+WEBHOOK_DELAY_SECONDS = max(0.0, float(os.getenv("WEBHOOK_DELAY_SECONDS", "10")))
+
+
 @celery_app.task(bind=True, name="workers.tasks.process_dispatch_request_task", max_retries=None)
 def process_dispatch_request_task(self, record: dict[str, Any]) -> dict[str, Any]:
     service_id = str(record.get("service_id") or "")
@@ -128,6 +131,8 @@ def process_dispatch_request(record: dict[str, Any]) -> dict[str, Any]:
 
         webhook_result = None
         if webhook_url:
+            if service_type == "comfyui" and WEBHOOK_DELAY_SECONDS > 0:
+                time.sleep(WEBHOOK_DELAY_SECONDS)
             artifacts = _extract_comfyui_artifacts(response)
             first_artifact = artifacts[0] if artifacts else None
             webhook_result = _fire_webhook(webhook_url, {
