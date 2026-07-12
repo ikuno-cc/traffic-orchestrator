@@ -33,12 +33,16 @@ def _ensure_psycopg_driver(url: str, prefix: str) -> str:
         return f"{prefix}postgresql+psycopg://{url[len(prefix + 'postgresql://'):]}"
     if url.startswith(f"{prefix}postgres://"):
         return f"{prefix}postgresql+psycopg://{url[len(prefix + 'postgres://'):]}"
+    if url.startswith("postgresql://"):
+        return f"{prefix}postgresql+psycopg://{url[len('postgresql://'):]}"
+    if url.startswith("postgres://"):
+        return f"{prefix}postgresql+psycopg://{url[len('postgres://'):]}"
     return url
 
 
 DATABASE_URL = _normalize_postgres_url(os.getenv("DATABASE_URL", "").strip())
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "").strip()
-CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "").strip()
+CELERY_BROKER_URL = _normalize_postgres_url(os.getenv("CELERY_BROKER_URL", "").strip())
+CELERY_RESULT_BACKEND = _normalize_postgres_url(os.getenv("CELERY_RESULT_BACKEND", "").strip())
 
 broker_url = CELERY_BROKER_URL or (f"sqla+{DATABASE_URL}" if DATABASE_URL else "")
 result_backend = CELERY_RESULT_BACKEND or (f"db+{DATABASE_URL}" if DATABASE_URL else "")
