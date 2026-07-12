@@ -37,7 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-EXTERNAL_API_PREFIX = ""
+EXTERNAL_API_PREFIX = os.getenv("EXTERNAL_API_PREFIX", "") or os.getenv("APP_EXTERNAL_API_PREFIX", "")
 REQUEST_RETENTION_HOURS = float(os.getenv("REQUEST_RETENTION_HOURS", "5"))
 REQUEST_CLEANUP_INTERVAL_SECONDS = int(os.getenv("REQUEST_CLEANUP_INTERVAL_SECONDS", "600"))
 # When True, fall back to the default 'celery' queue if the worker hasn't confirmed
