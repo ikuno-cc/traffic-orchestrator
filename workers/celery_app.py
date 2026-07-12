@@ -30,22 +30,6 @@ def _normalize_postgres_url(raw_url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-def _ensure_psycopg_driver(url: str, prefix: str) -> str:
-    if not url:
-        return url
-    if url.startswith(f"{prefix}postgresql+psycopg://"):
-        return url
-    if url.startswith(f"{prefix}postgresql://"):
-        return f"{prefix}postgresql+psycopg://{url[len(prefix + 'postgresql://'):]}"
-    if url.startswith(f"{prefix}postgres://"):
-        return f"{prefix}postgresql+psycopg://{url[len(prefix + 'postgres://'):]}"
-    if url.startswith("postgresql://"):
-        return f"{prefix}postgresql+psycopg://{url[len('postgresql://'):]}"
-    if url.startswith("postgres://"):
-        return f"{prefix}postgresql+psycopg://{url[len('postgres://'):]}"
-    return url
-
-
 DATABASE_URL = _normalize_postgres_url(os.getenv("DATABASE_URL", "").strip())
 CELERY_BROKER_URL = _normalize_postgres_url(os.getenv("CELERY_BROKER_URL", "").strip())
 CELERY_RESULT_BACKEND = _normalize_postgres_url(os.getenv("CELERY_RESULT_BACKEND", "").strip())
@@ -56,8 +40,9 @@ result_backend = CELERY_RESULT_BACKEND or (f"db+{DATABASE_URL}" if DATABASE_URL 
 # was already prefixed with sqla+/db+ but still used the legacy 'postgres://' scheme.
 broker_url = _normalize_postgres_url(broker_url)
 result_backend = _normalize_postgres_url(result_backend)
-broker_url = _ensure_psycopg_driver(broker_url, "sqla+")
-result_backend = _ensure_psycopg_driver(result_backend, "db+")
+# NOTE: Do NOT force a specific driver suffix (e.g. +psycopg or +psycopg2).
+# SQLAlchemy auto-detects the installed driver from the plain postgresql:// scheme.
+# Forcing +psycopg breaks images that only have psycopg2, and vice-versa.
 
 if not broker_url:
     raise RuntimeError("Celery broker is not configured. Set CELERY_BROKER_URL or DATABASE_URL.")
