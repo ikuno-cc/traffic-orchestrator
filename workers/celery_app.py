@@ -31,6 +31,8 @@ def _ensure_psycopg_driver(url: str, prefix: str) -> str:
         return url
     if url.startswith(f"{prefix}postgresql://"):
         return f"{prefix}postgresql+psycopg://{url[len(prefix + 'postgresql://'):]}"
+    if url.startswith(f"{prefix}postgres://"):
+        return f"{prefix}postgresql+psycopg://{url[len(prefix + 'postgres://'):]}"
     return url
 
 
