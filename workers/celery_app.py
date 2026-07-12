@@ -5,15 +5,21 @@ from celery import Celery
 
 
 def _normalize_postgres_url(raw_url: str) -> str:
+    """Replace every occurrence of the deprecated 'postgres://' scheme with
+    'postgresql://' regardless of which prefix (sqla+, db+, bare) is used.
+    SQLAlchemy 2.x removed the 'postgres' dialect alias entirely."""
     if not raw_url:
         return raw_url
     raw_url = raw_url.strip().strip('"').strip("'")
-    if raw_url.startswith("sqla+postgres://"):
-        raw_url = "sqla+postgresql://" + raw_url[len("sqla+postgres://") :]
-    elif raw_url.startswith("db+postgres://"):
-        raw_url = "db+postgresql://" + raw_url[len("db+postgres://") :]
-    elif raw_url.startswith("postgres://"):
-        raw_url = "postgresql://" + raw_url[len("postgres://") :]
+    # Handle all known prefix variants so nothing slips through.
+    for old, new in [
+        ("sqla+postgres://", "sqla+postgresql://"),
+        ("db+postgres://", "db+postgresql://"),
+        ("postgres://", "postgresql://"),
+    ]:
+        if raw_url.startswith(old):
+            raw_url = new + raw_url[len(old):]
+            break
     parts = urlsplit(raw_url)
     if not parts.password:
         return raw_url
@@ -24,24 +30,19 @@ def _normalize_postgres_url(raw_url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-def _ensure_psycopg_driver(url: str, prefix: str) -> str:
-    if not url:
-        return url
-    if url.startswith(f"{prefix}postgresql+psycopg://"):
-        return url
-    if url.startswith(f"{prefix}postgresql://"):
-        return f"{prefix}postgresql+psycopg://{url[len(prefix + 'postgresql://'):]}"
-    return url
-
-
 DATABASE_URL = _normalize_postgres_url(os.getenv("DATABASE_URL", "").strip())
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "").strip()
-CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "").strip()
+CELERY_BROKER_URL = _normalize_postgres_url(os.getenv("CELERY_BROKER_URL", "").strip())
+CELERY_RESULT_BACKEND = _normalize_postgres_url(os.getenv("CELERY_RESULT_BACKEND", "").strip())
 
 broker_url = CELERY_BROKER_URL or (f"sqla+{DATABASE_URL}" if DATABASE_URL else "")
 result_backend = CELERY_RESULT_BACKEND or (f"db+{DATABASE_URL}" if DATABASE_URL else "")
-broker_url = _ensure_psycopg_driver(broker_url, "sqla+")
-result_backend = _ensure_psycopg_driver(result_backend, "db+")
+# Normalize again after prefix assembly – catches cases where the env var
+# was already prefixed with sqla+/db+ but still used the legacy 'postgres://' scheme.
+broker_url = _normalize_postgres_url(broker_url)
+result_backend = _normalize_postgres_url(result_backend)
+# NOTE: Do NOT force a specific driver suffix (e.g. +psycopg or +psycopg2).
+# SQLAlchemy auto-detects the installed driver from the plain postgresql:// scheme.
+# Forcing +psycopg breaks images that only have psycopg2, and vice-versa.
 
 if not broker_url:
     raise RuntimeError("Celery broker is not configured. Set CELERY_BROKER_URL or DATABASE_URL.")

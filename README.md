@@ -18,7 +18,7 @@ Traffic Orch is a traffic and request orchestration platform used to route jobs 
 ## Quick Start (Docker)
 
 ```bash
-cd "Traffic Orch/docker"
+cd "Traffic Orch"
 docker compose up -d --build
 ```
 
