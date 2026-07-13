@@ -29,6 +29,7 @@ from app.storage import (
     delete_service as store_delete_service,
     get_request as store_get_request,
     get_service as store_get_service,
+    initialize_database,
     is_storage_enabled,
     list_requests as store_list_requests,
     list_services as store_list_services,
@@ -60,6 +61,16 @@ frontend_dist_dir = os.path.join(
 async def lifespan(app: FastAPI):
     global _cleanup_task
 
+    # 0. Initialize database tables
+    try:
+         if is_storage_enabled():
+             initialize_database()
+             print("[STARTUP] Database initialized successfully.")
+         else:
+             print("[STARTUP] Database storage is not enabled.")
+    except Exception as exc:
+         print(f"[STARTUP] Could not initialize database: {exc}")
+
     # 1. Register job handler and start the engine
     engine.set_handler(handle_job)
     engine.start()
@@ -79,6 +90,7 @@ async def lifespan(app: FastAPI):
     _cleanup_task = asyncio.create_task(_request_cleanup_loop())
 
     yield  # ← app runs here
+
 
     # Shutdown
     if _cleanup_task:

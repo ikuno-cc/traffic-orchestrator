@@ -46,6 +46,74 @@ def _pg_conn():
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
+def initialize_database() -> None:
+    """Initialize database tables and columns if they do not exist, retrying on connection failure."""
+    import time
+    conn = None
+    last_err = None
+    for attempt in range(1, 6):
+        try:
+            conn = _pg_conn()
+            if conn is not None:
+                break
+        except Exception as exc:
+            last_err = exc
+            print(f"[DB-INIT] Connection attempt {attempt}/5 failed: {exc}")
+            time.sleep(2)
+            
+    if conn is None:
+        raise RuntimeError(f"Could not connect to Postgres database: {last_err}")
+        
+    with conn:
+        with conn.cursor() as cur:
+            # Create schema if not exists
+            if PG_SCHEMA != "public":
+                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{PG_SCHEMA}"')
+            
+            # Create services table
+            services_table = f'"{PG_SCHEMA}"."{SERVICES_TABLE}"'
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {services_table} (
+                    id TEXT PRIMARY KEY,
+                    name TEXT,
+                    type TEXT,
+                    endpoint TEXT,
+                    description TEXT,
+                    timeout INTEGER DEFAULT 120,
+                    delay_seconds NUMERIC DEFAULT 3.0,
+                    enabled BOOLEAN DEFAULT TRUE,
+                    custom_header JSONB DEFAULT '{{}}'::jsonb,
+                    worker_count INTEGER DEFAULT 1,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Ensure worker_count column exists in services table
+            cur.execute(f"""
+                ALTER TABLE {services_table} 
+                ADD COLUMN IF NOT EXISTS worker_count INTEGER DEFAULT 1
+            """)
+
+            # Create requests table
+            requests_table = f'"{PG_SCHEMA}"."{REQUESTS_TABLE}"'
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {requests_table} (
+                    id TEXT PRIMARY KEY,
+                    service_id TEXT REFERENCES {services_table}(id) ON DELETE SET NULL,
+                    status TEXT,
+                    info JSONB DEFAULT '{{}}'::jsonb,
+                    priority INTEGER DEFAULT 5,
+                    duration NUMERIC,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Create indexes
+            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_requests_service_status ON {requests_table} (service_id, status)")
+            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_requests_created_at ON {requests_table} (created_at)")
+
+
+
 def _request_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     record: dict[str, Any] = {}
     raw_info = row.get("info")
