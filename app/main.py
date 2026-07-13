@@ -323,7 +323,7 @@ async def _request_cleanup_loop() -> None:
 
 @app.get("/health")
 @log_route_errors
-def health():
+async def health():
     db_ok = False
     db_err = None
     if is_storage_enabled():
@@ -351,14 +351,14 @@ def health():
 
 @app.get("/services")
 @log_route_errors
-def api_list_services():
+async def api_list_services():
     _require_storage()
     return store_list_services()
 
 
 @app.post("/services", status_code=201)
 @log_route_errors
-def create_service(service: ServiceConfig):
+async def create_service(service: ServiceConfig):
     _require_storage()
     if store_get_service(service.id):
         return JSONResponse(status_code=200, content=jsonable_encoder(store_get_service(service.id)))
@@ -375,7 +375,7 @@ def create_service(service: ServiceConfig):
 
 @app.get("/services/{service_id}")
 @log_route_errors
-def api_get_service(service_id: str):
+async def api_get_service(service_id: str):
     _require_storage()
     service = store_get_service(service_id)
     if not service:
@@ -385,7 +385,7 @@ def api_get_service(service_id: str):
 
 @app.put("/services/{service_id}")
 @log_route_errors
-def update_service(service_id: str, service: ServiceConfig):
+async def update_service(service_id: str, service: ServiceConfig):
     _require_storage()
     existing = store_get_service(service_id)
     if not existing:
@@ -405,7 +405,7 @@ def update_service(service_id: str, service: ServiceConfig):
 
 @app.delete("/services/{service_id}")
 @log_route_errors
-def api_delete_service(service_id: str):
+async def api_delete_service(service_id: str):
     _require_storage()
     if not store_get_service(service_id):
         raise HTTPException(404, "Service not found")
@@ -417,7 +417,7 @@ def api_delete_service(service_id: str):
 
 @app.post("/services/{service_id}/pause")
 @log_route_errors
-def pause_service(service_id: str):
+async def pause_service(service_id: str):
     _require_storage()
     service = store_get_service(service_id)
     if not service:
@@ -429,7 +429,7 @@ def pause_service(service_id: str):
 
 @app.post("/services/{service_id}/resume")
 @log_route_errors
-def resume_service(service_id: str):
+async def resume_service(service_id: str):
     _require_storage()
     service = store_get_service(service_id)
     if not service:
@@ -513,7 +513,7 @@ async def dispatch(req: DispatchRequest):
 
 @app.get("/requests")
 @log_route_errors
-def api_list_requests(
+async def api_list_requests(
     service_id: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 100,
@@ -528,7 +528,7 @@ def api_list_requests(
 
 @app.get("/requests/{request_id}")
 @log_route_errors
-def api_get_request(request_id: str):
+async def api_get_request(request_id: str):
     _require_storage()
     record = store_get_request(request_id)
     if not record:
@@ -538,7 +538,7 @@ def api_get_request(request_id: str):
 
 @app.post("/requests/{request_id}/cancel")
 @log_route_errors
-def cancel_request(request_id: str):
+async def cancel_request(request_id: str):
     _require_storage()
     record = store_get_request(request_id)
     if not record:
@@ -586,7 +586,7 @@ async def retry_request(request_id: str):
 
 @app.delete("/requests/{request_id}")
 @log_route_errors
-def api_delete_request(request_id: str):
+async def api_delete_request(request_id: str):
     _require_storage()
     if not store_delete_request(request_id):
         raise HTTPException(502, "Failed to delete request from Postgres")
@@ -599,7 +599,7 @@ def api_delete_request(request_id: str):
 
 @app.get("/workers")
 @log_route_errors
-def get_workers():
+async def get_workers():
     _require_storage()
     services = store_list_services()
     rows = []
@@ -624,7 +624,7 @@ def get_workers():
 
 @app.post("/workers/concurrency")
 @log_route_errors
-def set_workers_concurrency(update: WorkerConcurrencyUpdate):
+async def set_workers_concurrency(update: WorkerConcurrencyUpdate):
     _require_storage()
     services = store_list_services()
     for s in services:
@@ -640,7 +640,7 @@ def set_workers_concurrency(update: WorkerConcurrencyUpdate):
 
 @app.get("/stats")
 @log_route_errors
-def stats():
+async def stats():
     _require_storage()
     records = store_list_requests(limit=1000)
     services = store_list_services()
@@ -668,7 +668,7 @@ def stats():
 
 @app.post("/sink")
 @log_route_errors
-def sink(payload: Any = Body(...)):
+async def sink(payload: Any = Body(...)):
     return {"status": "accepted", "received": payload, "time": datetime.utcnow().isoformat()}
 
 
