@@ -40,6 +40,12 @@ result_backend = CELERY_RESULT_BACKEND or (f"db+{DATABASE_URL}" if DATABASE_URL 
 # was already prefixed with sqla+/db+ but still used the legacy 'postgres://' scheme.
 broker_url = _normalize_postgres_url(broker_url)
 result_backend = _normalize_postgres_url(result_backend)
+
+# Ensure database endpoints have the correct scheme prefix for Kombu/Celery
+if broker_url.startswith("postgresql://"):
+    broker_url = "sqla+" + broker_url
+if result_backend.startswith("postgresql://"):
+    result_backend = "db+" + result_backend
 # NOTE: Do NOT force a specific driver suffix (e.g. +psycopg or +psycopg2).
 # SQLAlchemy auto-detects the installed driver from the plain postgresql:// scheme.
 # Forcing +psycopg breaks images that only have psycopg2, and vice-versa.
