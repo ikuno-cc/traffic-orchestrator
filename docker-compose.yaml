@@ -11,8 +11,8 @@ services:
       - REQUEST_RETENTION_HOURS=${REQUEST_RETENTION_HOURS:-5}
       - REQUEST_CLEANUP_INTERVAL_SECONDS=${REQUEST_CLEANUP_INTERVAL_SECONDS:-600}
       - WEBHOOK_DELAY_SECONDS=${WEBHOOK_DELAY_SECONDS:-10}
-    ports:
-      - '8000:8000'
+    expose:
+      - '8000'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
