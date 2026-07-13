@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+import logging
+import functools
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Literal, Optional
@@ -37,7 +40,19 @@ from app.storage import (
     update_request_fields,
     upsert_request,
     upsert_service,
+    StorageError,
+    connect_healthcheck,
 )
+
+# ---------------------------------------------------------------------------
+# Logging Config
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("traffic_orchestrator.api")
 
 # ---------------------------------------------------------------------------
 # Config
@@ -54,6 +69,34 @@ frontend_dist_dir = os.path.join(
 )
 
 # ---------------------------------------------------------------------------
+# Route Error Logger Decorator
+# ---------------------------------------------------------------------------
+
+def log_route_errors(func):
+    if asyncio.iscoroutinefunction(func):
+        @functools.wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error(f"Server error in route {func.__name__}: {exc}", exc_info=True)
+                raise
+        return async_wrapper
+    else:
+        @functools.wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error(f"Server error in route {func.__name__}: {exc}", exc_info=True)
+                raise
+        return sync_wrapper
+
+# ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
 
@@ -62,35 +105,36 @@ async def lifespan(app: FastAPI):
     global _cleanup_task
 
     # 0. Initialize database tables
+    db_init_success = False
     try:
          if is_storage_enabled():
              initialize_database()
-             print("[STARTUP] Database initialized successfully.")
+             db_init_success = True
+             logger.info("[STARTUP] Database initialized successfully.")
          else:
-             print("[STARTUP] Database storage is not enabled.")
+             logger.info("[STARTUP] Database storage is not enabled.")
     except Exception as exc:
-         print(f"[STARTUP] Could not initialize database: {exc}")
+         logger.critical("[STARTUP] Could not initialize database during startup", exc_info=True)
 
     # 1. Register job handler and start the engine
     engine.set_handler(handle_job)
     engine.start()
 
-    # 2. Pre-create worker pools for every existing service so requests
-    #    that come in immediately after startup are routed correctly.
-    try:
-         for svc in store_list_services():
-             sid = str(svc.get("id") or "")
-             wc = int(svc.get("worker_count") or 1)
-             if sid:
-                 engine.get_or_create_pool(sid, wc)
-    except Exception as exc:
-         print(f"[STARTUP] Could not pre-create worker pools: {exc}")
+    # 2. Pre-create worker pools for every existing service if init succeeded
+    if db_init_success:
+        try:
+             for svc in store_list_services():
+                 sid = str(svc.get("id") or "")
+                 wc = int(svc.get("worker_count") or 1)
+                 if sid:
+                     engine.get_or_create_pool(sid, wc)
+        except Exception as exc:
+             logger.error("[STARTUP] Could not pre-create worker pools", exc_info=True)
 
     # 3. Start periodic request cleanup
     _cleanup_task = asyncio.create_task(_request_cleanup_loop())
 
     yield  # ← app runs here
-
 
     # Shutdown
     if _cleanup_task:
@@ -117,6 +161,23 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
+# Global Exception Handlers
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(StorageError)
+async def storage_error_handler(request: Request, exc: StorageError):
+    tb = traceback.format_exc()
+    logger.error(f"Database error during request {request.method} {request.url.path}: {tb}")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": f"Database unavailable: {exc}",
+            "type": "StorageError",
+            "traceback": tb.splitlines()
+        }
+    )
+
+# ---------------------------------------------------------------------------
 # Middleware: Route /api prefix to non-prefixed routes internally
 # ---------------------------------------------------------------------------
 
@@ -140,15 +201,13 @@ async def api_prefix_middleware(request: Request, call_next):
 # Middleware: Expose exceptions traceback in 500 responses for remote debugging
 # ---------------------------------------------------------------------------
 
-import traceback
-
 @app.middleware("http")
 async def exception_debug_middleware(request: Request, call_next):
     try:
         return await call_next(request)
     except Exception as exc:
         tb = traceback.format_exc()
-        print(f"Exception during request {request.method} {request.url.path}: {tb}")
+        logger.error(f"Unhandled exception during request {request.method} {request.url.path}: {tb}", exc_info=True)
         return JSONResponse(
             status_code=500,
             content={
@@ -157,7 +216,6 @@ async def exception_debug_middleware(request: Request, call_next):
                 "traceback": tb.splitlines()
             }
         )
-
 
 
 # ---------------------------------------------------------------------------
@@ -253,9 +311,9 @@ async def _request_cleanup_loop() -> None:
         try:
             removed = delete_completed_requests_older_than(REQUEST_RETENTION_HOURS)
             if removed:
-                print(f"[CLEANUP] Deleted {removed} completed requests older than {REQUEST_RETENTION_HOURS}h")
+                logger.info(f"[CLEANUP] Deleted {removed} completed requests older than {REQUEST_RETENTION_HOURS}h")
         except Exception as exc:
-            print(f"[CLEANUP] Failed: {exc}")
+            logger.error(f"[CLEANUP] Failed: {exc}", exc_info=True)
         await asyncio.sleep(max(30, REQUEST_CLEANUP_INTERVAL_SECONDS))
 
 
@@ -264,12 +322,25 @@ async def _request_cleanup_loop() -> None:
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
+@log_route_errors
 def health():
+    db_ok = False
+    db_err = None
+    if is_storage_enabled():
+        try:
+            db_ok = connect_healthcheck()
+        except Exception as exc:
+            db_ok = False
+            db_err = str(exc)
+            
+    is_healthy = db_ok if is_storage_enabled() else True
+    
     return {
-        "status": "ok",
+        "status": "ok" if is_healthy else "error",
         "time": datetime.utcnow().isoformat(),
         "storage_backend": storage_backend_name(),
-        "storage_enabled": is_storage_enabled(),
+        "storage_enabled": is_storage_enabled() and db_ok,
+        "storage_error": db_err,
         "engine": engine.stats(),
     }
 
@@ -279,12 +350,14 @@ def health():
 # ---------------------------------------------------------------------------
 
 @app.get("/services")
+@log_route_errors
 def api_list_services():
     _require_storage()
     return store_list_services()
 
 
 @app.post("/services", status_code=201)
+@log_route_errors
 def create_service(service: ServiceConfig):
     _require_storage()
     if store_get_service(service.id):
@@ -301,6 +374,7 @@ def create_service(service: ServiceConfig):
 
 
 @app.get("/services/{service_id}")
+@log_route_errors
 def api_get_service(service_id: str):
     _require_storage()
     service = store_get_service(service_id)
@@ -310,6 +384,7 @@ def api_get_service(service_id: str):
 
 
 @app.put("/services/{service_id}")
+@log_route_errors
 def update_service(service_id: str, service: ServiceConfig):
     _require_storage()
     existing = store_get_service(service_id)
@@ -329,6 +404,7 @@ def update_service(service_id: str, service: ServiceConfig):
 
 
 @app.delete("/services/{service_id}")
+@log_route_errors
 def api_delete_service(service_id: str):
     _require_storage()
     if not store_get_service(service_id):
@@ -340,6 +416,7 @@ def api_delete_service(service_id: str):
 
 
 @app.post("/services/{service_id}/pause")
+@log_route_errors
 def pause_service(service_id: str):
     _require_storage()
     service = store_get_service(service_id)
@@ -351,6 +428,7 @@ def pause_service(service_id: str):
 
 
 @app.post("/services/{service_id}/resume")
+@log_route_errors
 def resume_service(service_id: str):
     _require_storage()
     service = store_get_service(service_id)
@@ -375,6 +453,7 @@ def resume_service(service_id: str):
 # ---------------------------------------------------------------------------
 
 @app.post("/dispatch")
+@log_route_errors
 async def dispatch(req: DispatchRequest):
     _require_storage()
     service = store_get_service(req.service_id)
@@ -433,6 +512,7 @@ async def dispatch(req: DispatchRequest):
 # ---------------------------------------------------------------------------
 
 @app.get("/requests")
+@log_route_errors
 def api_list_requests(
     service_id: Optional[str] = None,
     status: Optional[str] = None,
@@ -447,6 +527,7 @@ def api_list_requests(
 
 
 @app.get("/requests/{request_id}")
+@log_route_errors
 def api_get_request(request_id: str):
     _require_storage()
     record = store_get_request(request_id)
@@ -456,6 +537,7 @@ def api_get_request(request_id: str):
 
 
 @app.post("/requests/{request_id}/cancel")
+@log_route_errors
 def cancel_request(request_id: str):
     _require_storage()
     record = store_get_request(request_id)
@@ -468,6 +550,7 @@ def cancel_request(request_id: str):
 
 
 @app.post("/requests/{request_id}/retry")
+@log_route_errors
 async def retry_request(request_id: str):
     _require_storage()
     record = store_get_request(request_id)
@@ -502,6 +585,7 @@ async def retry_request(request_id: str):
 
 
 @app.delete("/requests/{request_id}")
+@log_route_errors
 def api_delete_request(request_id: str):
     _require_storage()
     if not store_delete_request(request_id):
@@ -514,6 +598,7 @@ def api_delete_request(request_id: str):
 # ---------------------------------------------------------------------------
 
 @app.get("/workers")
+@log_route_errors
 def get_workers():
     _require_storage()
     services = store_list_services()
@@ -538,6 +623,7 @@ def get_workers():
 
 
 @app.post("/workers/concurrency")
+@log_route_errors
 def set_workers_concurrency(update: WorkerConcurrencyUpdate):
     _require_storage()
     services = store_list_services()
@@ -553,6 +639,7 @@ def set_workers_concurrency(update: WorkerConcurrencyUpdate):
 # ---------------------------------------------------------------------------
 
 @app.get("/stats")
+@log_route_errors
 def stats():
     _require_storage()
     records = store_list_requests(limit=1000)
@@ -580,6 +667,7 @@ def stats():
 # ---------------------------------------------------------------------------
 
 @app.post("/sink")
+@log_route_errors
 def sink(payload: Any = Body(...)):
     return {"status": "accepted", "received": payload, "time": datetime.utcnow().isoformat()}
 

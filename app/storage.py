@@ -1,8 +1,17 @@
 import json
 import os
+import functools
+import threading
+import logging
 from datetime import datetime
 from typing import Any, Optional
 from urllib.parse import quote, urlsplit, urlunsplit
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 try:
     import psycopg
@@ -11,6 +20,23 @@ except Exception:  # pragma: no cover
     psycopg = None
     dict_row = None
 
+logger = logging.getLogger("traffic_orchestrator.storage")
+
+class StorageError(Exception):
+    """Custom exception raised for all database storage/query connection errors."""
+    pass
+
+def wrap_db_errors(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except StorageError:
+            raise
+        except Exception as exc:
+            err_msg = str(exc)
+            raise StorageError(f"Database error in {func.__name__}: {err_msg}") from exc
+    return wrapper
 
 def _normalize_database_url(raw_url: str) -> str:
     if not raw_url:
@@ -25,93 +51,180 @@ def _normalize_database_url(raw_url: str) -> str:
     netloc = parts.netloc.replace(f":{parts.password}@", f":{encoded_password}@")
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
-
 DATABASE_URL = _normalize_database_url(os.getenv("DATABASE_URL", ""))
 PG_SCHEMA = os.getenv("PG_SCHEMA", "public")
 SERVICES_TABLE = os.getenv("SERVICES_TABLE", "orch_services")
 REQUESTS_TABLE = os.getenv("REQUESTS_TABLE", "orch_requests")
 
-
-def storage_backend_name() -> str:
-    return "postgres"
-
+# Threads safety for on-demand initialization
+_db_init_lock = threading.Lock()
+_database_initialized = False
 
 def is_storage_enabled() -> bool:
     return bool(DATABASE_URL) and psycopg is not None
 
+def storage_backend_name() -> str:
+    return "postgres"
 
+def ensure_database_initialized() -> None:
+    """Ensures database is initialized. If not, attempts to initialize."""
+    global _database_initialized
+    if _database_initialized:
+        return
+    if not is_storage_enabled():
+        return
+    with _db_init_lock:
+        if _database_initialized:
+            return
+        # Temporarily set to True to prevent infinite recursion loop
+        _database_initialized = True
+        try:
+            initialize_database()
+        except Exception as exc:
+            _database_initialized = False
+            logger.error(f"On-demand database initialization failed: {exc}", exc_info=True)
+            raise
+
+@wrap_db_errors
 def _pg_conn():
     if not is_storage_enabled():
         return None
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    ensure_database_initialized()
+    try:
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    except psycopg.Error as exc:
+        raise StorageError(f"Database connection failed: {exc}") from exc
 
+@wrap_db_errors
+def connect_healthcheck() -> bool:
+    """Attempts a real connection and a trivial query (SELECT 1) against the configured schema."""
+    if not is_storage_enabled():
+        return False
+    
+    # Check for Supabase Transaction Pooler mismatch & warn
+    if DATABASE_URL:
+        parts = urlsplit(DATABASE_URL)
+        if parts.port == 6543 or ":6543" in (parts.netloc or ""):
+            logger.warning(
+                "Supabase Transaction Pooler (port 6543) detected during healthcheck. "
+                "Advisory locks and SKIP LOCKED features may fail. Use Session Pooler (port 5432)."
+            )
 
+    conn = None
+    try:
+        # Use psycopg.connect directly to bypass potential recursion during healthcheck
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return True
+    except Exception as exc:
+        raise StorageError(f"Database healthcheck failed: {exc}") from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+@wrap_db_errors
 def initialize_database() -> None:
-    """Initialize database tables and columns if they do not exist, retrying on connection failure."""
+    """Initialize database tables and columns if they do not exist, query-checking for transaction poolers."""
+    if not is_storage_enabled():
+        return
+
     import time
     conn = None
     last_err = None
+    
+    # Check for Supabase Transaction Pooler mismatch
+    port_mismatch = False
+    if DATABASE_URL:
+        parts = urlsplit(DATABASE_URL)
+        if parts.port == 6543 or ":6543" in (parts.netloc or ""):
+            port_mismatch = True
+            
+    if port_mismatch:
+        logger.warning(
+            "[DB-INIT] Supabase Transaction Pooler (port 6543) detected. "
+            "Advisory locks (pg_try_advisory_xact_lock) and SKIP LOCKED features "
+            "require Session Pooler (port 5432) or a direct Postgres connection. "
+            "Expect runtime errors or locking malfunctions."
+        )
+
     for attempt in range(1, 6):
         try:
-            conn = _pg_conn()
+            # Connect directly to bypass ensure_database_initialized recursion
+            conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
             if conn is not None:
                 break
         except Exception as exc:
             last_err = exc
-            print(f"[DB-INIT] Connection attempt {attempt}/5 failed: {exc}")
+            logger.warning(f"[DB-INIT] Connection attempt {attempt}/5 failed: {exc}")
             time.sleep(2)
             
     if conn is None:
-        raise RuntimeError(f"Could not connect to Postgres database: {last_err}")
+        raise StorageError(f"Could not connect to Postgres database for schema initialization: {last_err}") from last_err
         
-    with conn:
-        with conn.cursor() as cur:
-            # Create schema if not exists
-            if PG_SCHEMA != "public":
-                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{PG_SCHEMA}"')
-            
-            # Create services table
-            services_table = f'"{PG_SCHEMA}"."{SERVICES_TABLE}"'
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS {services_table} (
-                    id TEXT PRIMARY KEY,
-                    name TEXT,
-                    type TEXT,
-                    endpoint TEXT,
-                    description TEXT,
-                    timeout INTEGER DEFAULT 120,
-                    delay_seconds NUMERIC DEFAULT 3.0,
-                    enabled BOOLEAN DEFAULT TRUE,
-                    custom_header JSONB DEFAULT '{{}}'::jsonb,
-                    worker_count INTEGER DEFAULT 1,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Create schema if not exists
+                if PG_SCHEMA != "public":
+                    cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{PG_SCHEMA}"')
+                
+                # Create services table
+                services_table = f'"{PG_SCHEMA}"."{SERVICES_TABLE}"'
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {services_table} (
+                        id TEXT PRIMARY KEY,
+                        name TEXT,
+                        type TEXT,
+                        endpoint TEXT,
+                        description TEXT,
+                        timeout INTEGER DEFAULT 120,
+                        delay_seconds NUMERIC DEFAULT 3.0,
+                        enabled BOOLEAN DEFAULT TRUE,
+                        custom_header JSONB DEFAULT '{{}}'::jsonb,
+                        worker_count INTEGER DEFAULT 1,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
 
-            # Ensure worker_count column exists in services table
-            cur.execute(f"""
-                ALTER TABLE {services_table} 
-                ADD COLUMN IF NOT EXISTS worker_count INTEGER DEFAULT 1
-            """)
+                # Ensure worker_count column exists
+                cur.execute(f"""
+                    ALTER TABLE {services_table} 
+                    ADD COLUMN IF NOT EXISTS worker_count INTEGER DEFAULT 1
+                """)
 
-            # Create requests table
-            requests_table = f'"{PG_SCHEMA}"."{REQUESTS_TABLE}"'
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS {requests_table} (
-                    id TEXT PRIMARY KEY,
-                    service_id TEXT REFERENCES {services_table}(id) ON DELETE SET NULL,
-                    status TEXT,
-                    info JSONB DEFAULT '{{}}'::jsonb,
-                    priority INTEGER DEFAULT 5,
-                    duration NUMERIC,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+                # Create requests table
+                requests_table = f'"{PG_SCHEMA}"."{REQUESTS_TABLE}"'
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {requests_table} (
+                        id TEXT PRIMARY KEY,
+                        service_id TEXT REFERENCES {services_table}(id) ON DELETE SET NULL,
+                        status TEXT,
+                        info JSONB DEFAULT '{{}}'::jsonb,
+                        priority INTEGER DEFAULT 5,
+                        duration NUMERIC,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
 
-            # Create indexes
-            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_requests_service_status ON {requests_table} (service_id, status)")
-            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_requests_created_at ON {requests_table} (created_at)")
-
+                # Create indexes
+                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_requests_service_status ON {requests_table} (service_id, status)")
+                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_requests_created_at ON {requests_table} (created_at)")
+                
+        logger.info("[DB-INIT] Database schema initialized successfully.")
+    except Exception as exc:
+        raise StorageError(f"Database schema initialization failed query execution: {exc}") from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _request_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
@@ -151,6 +264,7 @@ def _service_row_to_service(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@wrap_db_errors
 def list_services() -> list[dict[str, Any]]:
     conn = _pg_conn()
     if conn is None:
@@ -172,6 +286,7 @@ def list_services() -> list[dict[str, Any]]:
             return [_service_row_to_service(row) for row in cur.fetchall()]
 
 
+@wrap_db_errors
 def get_service(service_id: str) -> Optional[dict[str, Any]]:
     conn = _pg_conn()
     if conn is None:
@@ -196,6 +311,7 @@ def get_service(service_id: str) -> Optional[dict[str, Any]]:
     return _service_row_to_service(row) if row else None
 
 
+@wrap_db_errors
 def upsert_service(service: dict[str, Any]) -> None:
     conn = _pg_conn()
     if conn is None:
@@ -247,6 +363,7 @@ def upsert_service(service: dict[str, Any]) -> None:
                     raise
 
 
+@wrap_db_errors
 def delete_service(service_id: str) -> bool:
     conn = _pg_conn()
     if conn is None:
@@ -258,6 +375,7 @@ def delete_service(service_id: str) -> bool:
             return cur.rowcount > 0
 
 
+@wrap_db_errors
 def upsert_request(record: dict[str, Any]) -> None:
     conn = _pg_conn()
     if conn is None:
@@ -287,6 +405,7 @@ def upsert_request(record: dict[str, Any]) -> None:
             )
 
 
+@wrap_db_errors
 def get_request(request_id: str) -> Optional[dict[str, Any]]:
     conn = _pg_conn()
     if conn is None:
@@ -302,6 +421,7 @@ def get_request(request_id: str) -> Optional[dict[str, Any]]:
     return _request_row_to_record(row) if row else None
 
 
+@wrap_db_errors
 def list_requests(service_id: Optional[str] = None, status: Optional[str] = None, limit: int = 100) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 1000))
     conn = _pg_conn()
@@ -327,6 +447,7 @@ def list_requests(service_id: Optional[str] = None, status: Optional[str] = None
             return [_request_row_to_record(row) for row in cur.fetchall()]
 
 
+@wrap_db_errors
 def delete_request(request_id: str) -> bool:
     conn = _pg_conn()
     if conn is None:
@@ -338,6 +459,7 @@ def delete_request(request_id: str) -> bool:
             return cur.rowcount > 0
 
 
+@wrap_db_errors
 def update_request_fields(request_id: str, updates: dict[str, Any]) -> bool:
     conn = _pg_conn()
     if conn is None:
@@ -368,6 +490,7 @@ def update_request_fields(request_id: str, updates: dict[str, Any]) -> bool:
             return cur.rowcount > 0
 
 
+@wrap_db_errors
 def claim_next_queued_request(service_id: str) -> Optional[dict[str, Any]]:
     conn = _pg_conn()
     if conn is None:
@@ -399,6 +522,7 @@ def claim_next_queued_request(service_id: str) -> Optional[dict[str, Any]]:
             return record
 
 
+@wrap_db_errors
 def delete_completed_requests_older_than(hours: float, statuses: Optional[list[str]] = None) -> int:
     conn = _pg_conn()
     if conn is None:
@@ -416,12 +540,8 @@ def delete_completed_requests_older_than(hours: float, statuses: Optional[list[s
             return int(cur.rowcount or 0)
 
 
+@wrap_db_errors
 def try_start_request_with_service_limit(request_id: str, service_id: str, max_running: int) -> bool:
-    """
-    Atomically mark request as running if current running count for the same service
-    is below max_running. Uses advisory transaction lock per service to serialize
-    the check+update critical section.
-    """
     conn = _pg_conn()
     if conn is None:
         return False
