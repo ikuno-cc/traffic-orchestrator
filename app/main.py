@@ -27,7 +27,11 @@ from app.storage import (
 from workers.tasks import process_dispatch_request_task
 
 # FastAPI's built-in /docs and /openapi.json — no custom implementation needed.
-app = FastAPI(title="Traffic Orchestrator", version="2.0.0")
+app = FastAPI(
+    title="Traffic Orchestrator",
+    version="2.0.0",
+    root_path=os.getenv("API_ROOT_PATH", "/api")
+)
 
 app.add_middleware(
     CORSMiddleware,
