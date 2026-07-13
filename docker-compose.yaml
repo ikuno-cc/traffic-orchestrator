@@ -1,59 +1,22 @@
 services:
-  api:
+  orchestrator:
     build:
       context: .
       dockerfile: Dockerfile
     environment:
       - DATABASE_URL=${DATABASE_URL}
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-}
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-}
       - PG_SCHEMA=${PG_SCHEMA:-public}
       - SERVICES_TABLE=${SERVICES_TABLE:-orch_services}
       - REQUESTS_TABLE=${REQUESTS_TABLE:-orch_requests}
       - REQUEST_RETENTION_HOURS=${REQUEST_RETENTION_HOURS:-5}
       - REQUEST_CLEANUP_INTERVAL_SECONDS=${REQUEST_CLEANUP_INTERVAL_SECONDS:-600}
       - WEBHOOK_DELAY_SECONDS=${WEBHOOK_DELAY_SECONDS:-10}
-      - API_ROOT_PATH=${API_ROOT_PATH:-/api}
-    expose:
-      - '8000'
+    ports:
+      - '8000:8000'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 15s
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.worker
-    environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-}
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-}
-      - PG_SCHEMA=${PG_SCHEMA:-public}
-      - SERVICES_TABLE=${SERVICES_TABLE:-orch_services}
-      - REQUESTS_TABLE=${REQUESTS_TABLE:-orch_requests}
-      - WEBHOOK_DELAY_SECONDS=${WEBHOOK_DELAY_SECONDS:-10}
-    depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
-
-  gui:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.gui
-    expose:
-      - '80'
-    depends_on:
-      api:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
     restart: unless-stopped
