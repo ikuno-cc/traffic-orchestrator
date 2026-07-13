@@ -137,6 +137,30 @@ async def api_prefix_middleware(request: Request, call_next):
 
 
 # ---------------------------------------------------------------------------
+# Middleware: Expose exceptions traceback in 500 responses for remote debugging
+# ---------------------------------------------------------------------------
+
+import traceback
+
+@app.middleware("http")
+async def exception_debug_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(f"Exception during request {request.method} {request.url.path}: {tb}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(exc),
+                "type": exc.__class__.__name__,
+                "traceback": tb.splitlines()
+            }
+        )
+
+
+
+# ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
