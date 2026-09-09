@@ -1,35 +1,24 @@
 """
-Asyncio-based per-service job queue engine.
+Asyncio-based per-service job queue engine with multi-endpoint routing.
 Replaces Celery + SQLAlchemy broker entirely.
 
 Each service gets:
-  - a shared asyncio.Queue  (FIFO, in-process, no broker needed)
-  - One or more WebhookSlotPools, each representing one webhook endpoint
-    with its own worker capacity (max concurrent jobs for that URL).
+  - a shared asyncio.Queue (FIFO, in-process, no broker needed)
+  - a list of backend EndpointSlots in priority order:
+      [EndpointSlot(url1, workers1), EndpointSlot(url2, workers2), ...]
 
-When a job arrives:
-  1. The engine checks each WebhookSlotPool in order (first-available wins).
-  2. If a slot has capacity, the job is injected with that endpoint's
-     webhook_url and dispatched immediately to a worker.
-  3. If ALL slots are at capacity, the job is placed in the shared queue.
-  4. When any slot finishes a job it pulls the next item from the shared
-     queue (if any), keeping utilisation as high as possible.
-
-Backwards compatibility:
-  - If a service has no webhook_endpoints configured (legacy mode), the pool
-    falls back to the original single-queue, N-worker behaviour and the
-    webhook_url is left untouched in the record.
+Scheduling strategy:
+  1. Requests arrive and enter the service's queue.
+  2. The scheduler checks endpoints in configured priority order (first URL first).
+  3. If Endpoint 1 has free capacity (active < max_workers), the job is dispatched to Endpoint 1.
+  4. When Endpoint 1's workers are completely filled, the scheduler moves to Endpoint 2.
+  5. When all available endpoints' workers are full, requests wait in the queue.
+  6. As soon as ANY worker on ANY endpoint finishes, the slot is freed, and the next
+     queued request is immediately assigned to whichever endpoint worker finished first.
 
 Workers are lightweight coroutines. Blocking HTTP calls inside the dispatcher
 are offloaded to a thread pool via asyncio.to_thread(), keeping the event
 loop responsive regardless of service latency.
-
-NOTE: State is in-process only.  A restart will lose in-flight tasks
-that are still sitting in the asyncio.Queue (tasks already persisted
-to Postgres as 'queued' will be re-enqueued on the next dispatch call
-or can be retried via the API).  If you need durable queues, swap this
-engine for Redis Streams / RabbitMQ later without touching the rest of
-the app.
 """
 from __future__ import annotations
 
@@ -44,258 +33,168 @@ JobHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 # ---------------------------------------------------------------------------
-# Single webhook-endpoint slot pool
+# Single backend endpoint slot tracking
 # ---------------------------------------------------------------------------
 
-class WebhookSlotPool:
-    """
-    Manages a fixed number of concurrent job slots for ONE webhook endpoint.
+class EndpointSlot:
+    """Represents a single backend URL with a concurrency worker limit."""
 
-    Each slot is a worker coroutine that:
-      1. Acquires a semaphore permit (= one slot)
-      2. Pulls the next job from the shared service queue
-      3. Injects its own webhook_url into the record
-      4. Calls the handler
-      5. Releases the permit
-
-    When the queue is empty the worker waits on the queue, so it never spins.
-    """
-
-    def __init__(
-        self,
-        webhook_url: str,
-        max_workers: int,
-        shared_queue: "asyncio.Queue[dict]",
-        handler: JobHandler,
-        service_id: str,
-        slot_index: int,
-    ):
-        self.webhook_url = webhook_url
-        self._max_workers = max(1, max_workers)
-        self._queue = shared_queue
-        self._handler = handler
-        self._service_id = service_id
-        self._slot_index = slot_index
-        self._semaphore = asyncio.Semaphore(self._max_workers)
-        self._tasks: List[asyncio.Task] = []
-        self._active = 0  # jobs currently being processed by this slot
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def start(self) -> None:
-        self._tasks = [
-            asyncio.create_task(
-                self._worker_loop(),
-                name=f"worker-{self._service_id}-slot{self._slot_index}-{i}",
-            )
-            for i in range(self._max_workers)
-        ]
-        logger.info(
-            "WebhookSlotPool started: service=%s slot=%d url=%s workers=%d",
-            self._service_id, self._slot_index, self.webhook_url, self._max_workers,
-        )
-
-    def stop(self) -> None:
-        for t in self._tasks:
-            t.cancel()
-        self._tasks.clear()
-
-    # ------------------------------------------------------------------
-    # Worker loop
-    # ------------------------------------------------------------------
-
-    async def _worker_loop(self) -> None:
-        svc = self._service_id
-        slot = self._slot_index
-        while True:
-            try:
-                record = await self._queue.get()
-                self._active += 1
-                try:
-                    # Inject this slot's webhook URL into the record
-                    injected = copy.copy(record)
-                    injected["webhook_url"] = self.webhook_url
-                    await self._handler(injected)
-                except Exception as exc:
-                    logger.exception(
-                        "Unhandled error in slot %d worker for service %s: %s",
-                        slot, svc, exc,
-                    )
-                finally:
-                    self._active -= 1
-                    self._queue.task_done()
-            except asyncio.CancelledError:
-                logger.debug("WebhookSlotPool worker cancelled: service=%s slot=%d", svc, slot)
-                break
-
-    # ------------------------------------------------------------------
-    # Introspection
-    # ------------------------------------------------------------------
-
-    @property
-    def active(self) -> int:
-        """Number of jobs currently being processed by this slot pool."""
-        return self._active
-
-    @property
-    def max_workers(self) -> int:
-        return self._max_workers
+    def __init__(self, url: str, max_workers: int):
+        self.url = url
+        self.max_workers = max(1, max_workers)
+        self.active = 0
 
     @property
     def has_capacity(self) -> bool:
-        """True when this slot pool can accept at least one more job immediately."""
-        return self._active < self._max_workers
-
-    @property
-    def worker_count(self) -> int:
-        return self._max_workers
+        return self.active < self.max_workers
 
 
 # ---------------------------------------------------------------------------
-# Per-service worker pool  (wraps one or more WebhookSlotPools)
+# Per-service worker pool (manages multiple backend endpoints)
 # ---------------------------------------------------------------------------
 
 class ServiceWorkerPool:
     """
-    A per-service pool that routes jobs across one or more WebhookSlotPools.
-
-    In multi-webhook mode (webhook_endpoints provided):
-      - Each webhook endpoint has its own WebhookSlotPool with a dedicated
-        worker count.
-      - All slot pools share a single asyncio.Queue.
-      - Incoming jobs are placed on the shared queue directly.
-      - Workers in each slot pool pull from the shared queue in a standard
-        FIFO fashion; the first slot with an idle worker wins the job.
-
-    In legacy mode (no webhook_endpoints):
-      - A single slot pool is used with webhook_url left as-is from the record.
-      - Behaviour is identical to the old implementation.
+    Manages job scheduling across one or more backend endpoint URLs for a single service.
     """
 
     def __init__(
         self,
         service_id: str,
-        worker_count: int,
         handler: JobHandler,
-        webhook_endpoints: Optional[List[dict]] = None,
+        endpoints: Optional[List[dict]] = None,
+        worker_count: int = 1,
     ):
         self.service_id = service_id
         self._handler = handler
-        self._worker_count = worker_count  # legacy / fallback
-        self._webhook_endpoints: List[dict] = webhook_endpoints or []
-
-        # Shared FIFO queue — all slot pools drain this same queue
         self.queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._endpoints: List[EndpointSlot] = []
+        self._slot_freed_event = asyncio.Event()
+        self._scheduler_task: Optional[asyncio.Task] = None
+        self._active_job_tasks: set[asyncio.Task] = set()
+        self._pending_record: Optional[dict] = None
 
-        self._slot_pools: List[WebhookSlotPool] = []
-        self._legacy_tasks: List[asyncio.Task] = []  # used in legacy mode
+        self._init_endpoints(endpoints, worker_count)
+
+    def _init_endpoints(self, endpoints: Optional[List[dict]], worker_count: int = 1) -> None:
+        self._endpoints.clear()
+        if endpoints:
+            for ep in endpoints:
+                url = str(ep.get("url") or "").strip()
+                if url:
+                    workers = max(1, int(ep.get("workers") or ep.get("worker_count") or 1))
+                    self._endpoints.append(EndpointSlot(url=url, max_workers=workers))
+
+        # Fallback if no explicit endpoints provided
+        if not self._endpoints:
+            self._endpoints.append(EndpointSlot(url="", max_workers=max(1, worker_count)))
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        if self._webhook_endpoints:
-            self._start_multi_webhook()
-        else:
-            self._start_legacy()
-
-    def _start_multi_webhook(self) -> None:
-        """Start one WebhookSlotPool per configured webhook endpoint."""
-        for idx, ep in enumerate(self._webhook_endpoints):
-            url = ep.get("url", "")
-            workers = max(1, int(ep.get("workers", 1)))
-            slot = WebhookSlotPool(
-                webhook_url=url,
-                max_workers=workers,
-                shared_queue=self.queue,
-                handler=self._handler,
-                service_id=self.service_id,
-                slot_index=idx,
+        if self._scheduler_task is None or self._scheduler_task.done():
+            self._slot_freed_event.set()
+            self._scheduler_task = asyncio.create_task(
+                self._scheduler_loop(),
+                name=f"scheduler-{self.service_id}",
             )
-            slot.start()
-            self._slot_pools.append(slot)
-        logger.info(
-            "ServiceWorkerPool (multi-webhook) started: service=%s endpoints=%d total_workers=%d",
-            self.service_id,
-            len(self._slot_pools),
-            sum(s.max_workers for s in self._slot_pools),
-        )
-
-    def _start_legacy(self) -> None:
-        """Legacy mode: N workers, webhook_url untouched in record."""
-        count = max(1, self._worker_count)
-        self._legacy_tasks = [
-            asyncio.create_task(
-                self._legacy_worker_loop(),
-                name=f"worker-{self.service_id}-{i}",
+            logger.info(
+                "ServiceWorkerPool started: service=%s endpoints=%d total_workers=%d",
+                self.service_id,
+                len(self._endpoints),
+                sum(ep.max_workers for ep in self._endpoints),
             )
-            for i in range(count)
-        ]
-        logger.info(
-            "ServiceWorkerPool (legacy) started: service=%s workers=%d",
-            self.service_id, count,
-        )
 
     def stop(self) -> None:
-        for slot in self._slot_pools:
-            slot.stop()
-        self._slot_pools.clear()
-        for t in self._legacy_tasks:
+        if self._scheduler_task:
+            self._scheduler_task.cancel()
+            self._scheduler_task = None
+        for t in list(self._active_job_tasks):
             t.cancel()
-        self._legacy_tasks.clear()
+        self._active_job_tasks.clear()
+        for ep in self._endpoints:
+            ep.active = 0
+        logger.info("ServiceWorkerPool stopped for service %s", self.service_id)
 
     # ------------------------------------------------------------------
-    # Legacy worker loop (unchanged from original implementation)
+    # Dynamic update
     # ------------------------------------------------------------------
 
-    async def _legacy_worker_loop(self) -> None:
+    def update_endpoints(self, endpoints: Optional[List[dict]], worker_count: int = 1) -> None:
+        """Update backend endpoints and worker capacities at runtime."""
+        # Preserve active count on matching URLs if possible
+        old_active_map = {ep.url: ep.active for ep in self._endpoints}
+        self._init_endpoints(endpoints, worker_count)
+        for ep in self._endpoints:
+            if ep.url in old_active_map:
+                ep.active = min(old_active_map[ep.url], ep.max_workers)
+        self._slot_freed_event.set()
+        logger.info(
+            "ServiceWorkerPool updated: service=%s endpoints=%d total_workers=%d",
+            self.service_id,
+            len(self._endpoints),
+            sum(ep.max_workers for ep in self._endpoints),
+        )
+
+    # ------------------------------------------------------------------
+    # Scheduler Loop
+    # ------------------------------------------------------------------
+
+    async def _scheduler_loop(self) -> None:
         svc = self.service_id
         while True:
             try:
                 record = await self.queue.get()
-                try:
-                    await self._handler(record)
-                except Exception as exc:
-                    logger.exception("Unhandled error in worker for service %s: %s", svc, exc)
-                finally:
-                    self.queue.task_done()
+                self._pending_record = record
+
+                # Find the first available endpoint (in priority order)
+                while True:
+                    target_ep: Optional[EndpointSlot] = None
+                    for ep in self._endpoints:
+                        if ep.has_capacity:
+                            target_ep = ep
+                            break
+
+                    if target_ep is not None:
+                        target_ep.active += 1
+                        self._pending_record = None
+                        task = asyncio.create_task(
+                            self._execute_job(target_ep, record),
+                            name=f"worker-{svc}-{record.get('id')}",
+                        )
+                        self._active_job_tasks.add(task)
+                        task.add_done_callback(self._active_job_tasks.discard)
+                        self.queue.task_done()
+                        break
+                    else:
+                        # All endpoints are filled to their worker capacity!
+                        # Wait until any running worker finishes and frees a slot.
+                        self._slot_freed_event.clear()
+                        await self._slot_freed_event.wait()
             except asyncio.CancelledError:
-                logger.debug("Worker cancelled for service %s", svc)
+                logger.debug("Scheduler loop cancelled for service %s", svc)
                 break
+            except Exception as exc:
+                logger.exception("Unexpected error in scheduler loop for service %s: %s", svc, exc)
+                await asyncio.sleep(0.5)
 
-    # ------------------------------------------------------------------
-    # Resize (legacy mode only — called when worker_count changes at runtime)
-    # ------------------------------------------------------------------
-
-    def resize(self, new_count: int) -> None:
-        """Resize the legacy worker pool. No-op in multi-webhook mode."""
-        if self._slot_pools:
-            logger.warning(
-                "resize() called on multi-webhook ServiceWorkerPool for service=%s; ignored",
-                self.service_id,
+    async def _execute_job(self, endpoint: EndpointSlot, record: dict) -> None:
+        try:
+            job_record = copy.copy(record)
+            if endpoint.url:
+                job_record["target_url"] = endpoint.url
+            await self._handler(job_record)
+        except Exception as exc:
+            logger.exception(
+                "Unhandled error executing job %s on %s for service %s: %s",
+                record.get("id"), endpoint.url, self.service_id, exc
             )
-            return
-
-        new_count = max(1, new_count)
-        diff = new_count - self._worker_count
-        self._worker_count = new_count
-
-        if diff > 0:
-            for i in range(diff):
-                t = asyncio.create_task(
-                    self._legacy_worker_loop(),
-                    name=f"worker-{self.service_id}-resize-{i}",
-                )
-                self._legacy_tasks.append(t)
-            logger.info("Scaled UP service %s to %d workers (+%d)", self.service_id, new_count, diff)
-        elif diff < 0:
-            for _ in range(-diff):
-                if self._legacy_tasks:
-                    self._legacy_tasks.pop().cancel()
-            logger.info("Scaled DOWN service %s to %d workers (%d)", self.service_id, new_count, diff)
+        finally:
+            endpoint.active = max(0, endpoint.active - 1)
+            # Wake up the scheduler so any queued job can be dispatched to this free slot
+            self._slot_freed_event.set()
 
     # ------------------------------------------------------------------
     # Enqueueing
@@ -317,30 +216,25 @@ class ServiceWorkerPool:
 
     @property
     def depth(self) -> int:
-        return self.queue.qsize()
+        return self.queue.qsize() + (1 if self._pending_record is not None else 0)
 
     @property
     def worker_count(self) -> int:
-        if self._slot_pools:
-            return sum(s.max_workers for s in self._slot_pools)
-        return self._worker_count
+        return sum(ep.max_workers for ep in self._endpoints)
 
     @property
     def active_workers(self) -> int:
-        if self._slot_pools:
-            return sum(s.active for s in self._slot_pools)
-        return sum(1 for t in self._legacy_tasks if not t.done())
+        return sum(ep.active for ep in self._endpoints)
 
-    def webhook_slot_stats(self) -> List[dict]:
-        """Return per-slot stats for multi-webhook mode."""
+    def endpoint_stats(self) -> List[dict]:
         return [
             {
-                "url": s.webhook_url,
-                "max_workers": s.max_workers,
-                "active": s.active,
-                "has_capacity": s.has_capacity,
+                "url": ep.url,
+                "max_workers": ep.max_workers,
+                "active": ep.active,
+                "has_capacity": ep.has_capacity,
             }
-            for s in self._slot_pools
+            for ep in self._endpoints
         ]
 
 
@@ -350,8 +244,7 @@ class ServiceWorkerPool:
 
 class QueueEngine:
     """
-    Manages all per-service worker pools.  This is the single replacement
-    for the entire Celery infrastructure.
+    Manages per-service worker pools and dynamic endpoint dispatching.
     """
 
     def __init__(self):
@@ -359,12 +252,7 @@ class QueueEngine:
         self._handler: Optional[JobHandler] = None
         self._running = False
 
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
-
     def set_handler(self, handler: JobHandler) -> None:
-        """Register the async function that executes each job."""
         self._handler = handler
 
     def start(self) -> None:
@@ -376,78 +264,74 @@ class QueueEngine:
             pool.stop()
         self._pools.clear()
 
-    # ------------------------------------------------------------------
-    # Pool management
-    # ------------------------------------------------------------------
-
     def get_or_create_pool(
         self,
         service_id: str,
+        endpoints: Optional[List[dict]] = None,
         worker_count: int = 1,
-        webhook_endpoints: Optional[List[dict]] = None,
     ) -> ServiceWorkerPool:
         if service_id not in self._pools:
             assert self._handler is not None, "Call set_handler() before enqueueing."
             pool = ServiceWorkerPool(
                 service_id=service_id,
-                worker_count=worker_count,
                 handler=self._handler,
-                webhook_endpoints=webhook_endpoints or [],
+                endpoints=endpoints,
+                worker_count=worker_count,
             )
             pool.start()
             self._pools[service_id] = pool
         return self._pools[service_id]
 
-    def set_concurrency(self, service_id: str, new_count: int) -> None:
-        """Resize an existing pool's legacy worker count at runtime."""
+    def update_pool(
+        self,
+        service_id: str,
+        endpoints: Optional[List[dict]] = None,
+        worker_count: int = 1,
+    ) -> None:
+        """Update an existing pool's endpoints or create it if not yet existing."""
         pool = self._pools.get(service_id)
         if pool:
-            pool.resize(new_count)
-        # If the pool doesn't exist yet it will be created with the correct
-        # count the next time a job is dispatched for this service.
+            pool.update_endpoints(endpoints, worker_count)
+        else:
+            self.get_or_create_pool(service_id, endpoints, worker_count)
+
+    def set_concurrency(self, service_id: str, new_count: int) -> None:
+        """Legacy resize method."""
+        pool = self._pools.get(service_id)
+        if pool:
+            pool.update_endpoints(None, new_count)
 
     def remove_pool(self, service_id: str) -> None:
         pool = self._pools.pop(service_id, None)
         if pool:
             pool.stop()
 
-    # ------------------------------------------------------------------
-    # Dispatching
-    # ------------------------------------------------------------------
-
     async def enqueue(
         self,
         service_id: str,
         record: dict,
-        worker_count: int = 1,
         delay: float = 0.0,
-        webhook_endpoints: Optional[List[dict]] = None,
+        endpoints: Optional[List[dict]] = None,
+        worker_count: int = 1,
     ) -> None:
-        pool = self.get_or_create_pool(service_id, worker_count, webhook_endpoints)
+        pool = self.get_or_create_pool(service_id, endpoints=endpoints, worker_count=worker_count)
         await pool.enqueue(record, delay=delay)
-
-    # ------------------------------------------------------------------
-    # Stats
-    # ------------------------------------------------------------------
 
     def queue_depth(self, service_id: str) -> int:
         pool = self._pools.get(service_id)
         return pool.depth if pool else 0
 
     def stats(self) -> dict[str, Any]:
-        result = {}
-        for sid, p in self._pools.items():
-            entry: dict[str, Any] = {
+        return {
+            sid: {
                 "queue_depth": p.depth,
                 "workers": p.worker_count,
                 "active_workers": p.active_workers,
+                "endpoints": p.endpoint_stats(),
             }
-            slot_stats = p.webhook_slot_stats()
-            if slot_stats:
-                entry["webhook_slots"] = slot_stats
-            result[sid] = entry
-        return result
+            for sid, p in self._pools.items()
+        }
 
 
-# Module-level singleton — imported by main.py and dispatcher.py
+# Module-level singleton
 engine = QueueEngine()

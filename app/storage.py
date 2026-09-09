@@ -198,6 +198,12 @@ def initialize_database() -> None:
                     ADD COLUMN IF NOT EXISTS worker_count INTEGER DEFAULT 1
                 """)
 
+                # Ensure endpoints column exists
+                cur.execute(f"""
+                    ALTER TABLE {services_table} 
+                    ADD COLUMN IF NOT EXISTS endpoints JSONB DEFAULT '[]'::jsonb
+                """)
+
                 # Create requests table
                 requests_table = f'"{PG_SCHEMA}"."{REQUESTS_TABLE}"'
                 cur.execute(f"""
@@ -249,17 +255,38 @@ def _request_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _service_row_to_service(row: dict[str, Any]) -> dict[str, Any]:
+    raw_endpoints = row.get("endpoints")
+    endpoints = []
+    if isinstance(raw_endpoints, list):
+        endpoints = raw_endpoints
+    elif isinstance(raw_endpoints, str) and raw_endpoints.strip():
+        try:
+            parsed = json.loads(raw_endpoints)
+            if isinstance(parsed, list):
+                endpoints = parsed
+        except Exception:
+            endpoints = []
+
+    primary_url = row.get("endpoint") or ""
+    worker_count = int(row.get("worker_count") or 1)
+
+    if not endpoints and primary_url:
+        endpoints = [{"url": primary_url, "workers": worker_count}]
+    elif endpoints and not primary_url:
+        primary_url = endpoints[0].get("url", "")
+
     return {
         "id": row.get("id"),
         "name": row.get("name"),
         "type": row.get("type"),
-        "url": row.get("endpoint"),
+        "url": primary_url,
+        "endpoints": endpoints,
         "description": row.get("description") or "",
         "timeout": int(row.get("timeout") or 120),
         "enabled": bool(row.get("enabled", True)),
         "headers": row.get("custom_header") or {},
         "delay_seconds": float(row.get("delay_seconds", 3) or 3),
-        "worker_count": int(row.get("worker_count") or 1),
+        "worker_count": worker_count,
         "created_at": row.get("created_at"),
     }
 
@@ -274,10 +301,10 @@ def list_services() -> list[dict[str, Any]]:
             table = f'"{PG_SCHEMA}"."{SERVICES_TABLE}"'
             try:
                 cur.execute(
-                    f"SELECT id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,worker_count,created_at FROM {table} ORDER BY created_at DESC"
+                    f"SELECT id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,worker_count,endpoints,created_at FROM {table} ORDER BY created_at DESC"
                 )
             except Exception as exc:
-                if "worker_count" in str(exc):
+                if "endpoints" in str(exc) or "worker_count" in str(exc):
                     cur.execute(
                         f"SELECT id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,created_at FROM {table} ORDER BY created_at DESC"
                     )
@@ -296,11 +323,11 @@ def get_service(service_id: str) -> Optional[dict[str, Any]]:
             table = f'"{PG_SCHEMA}"."{SERVICES_TABLE}"'
             try:
                 cur.execute(
-                    f"SELECT id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,worker_count,created_at FROM {table} WHERE id=%s LIMIT 1",
+                    f"SELECT id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,worker_count,endpoints,created_at FROM {table} WHERE id=%s LIMIT 1",
                     (service_id,),
                 )
             except Exception as exc:
-                if "worker_count" in str(exc):
+                if "endpoints" in str(exc) or "worker_count" in str(exc):
                     cur.execute(
                         f"SELECT id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,created_at FROM {table} WHERE id=%s LIMIT 1",
                         (service_id,),
@@ -317,17 +344,25 @@ def upsert_service(service: dict[str, Any]) -> None:
     if conn is None:
         return
     table = f'"{PG_SCHEMA}"."{SERVICES_TABLE}"'
+
+    endpoints = service.get("endpoints") or []
+    if not endpoints and service.get("url"):
+        endpoints = [{"url": service.get("url"), "workers": int(service.get("worker_count", 1) or 1)}]
+    primary_url = service.get("url") or (endpoints[0]["url"] if endpoints else "")
+    worker_count = sum(int(ep.get("workers", 1) or 1) for ep in endpoints) if endpoints else int(service.get("worker_count", 1) or 1)
+
     payload = {
         "id": service.get("id"),
         "name": service.get("name"),
         "type": service.get("type"),
-        "endpoint": service.get("url"),
+        "endpoint": primary_url,
+        "endpoints": json.dumps(endpoints),
         "description": service.get("description") or "",
         "timeout": int(service.get("timeout", 120)),
         "delay_seconds": float(service.get("delay_seconds", 3) or 3),
         "enabled": bool(service.get("enabled", True)),
         "custom_header": json.dumps(service.get("headers", {})),
-        "worker_count": int(service.get("worker_count", 1) or 1),
+        "worker_count": worker_count,
         "created_at": service.get("created_at") or datetime.utcnow().isoformat(),
     }
     with conn:
@@ -336,17 +371,17 @@ def upsert_service(service: dict[str, Any]) -> None:
                 cur.execute(
                     f"""
                     INSERT INTO {table}
-                    (id,name,type,endpoint,description,timeout,delay_seconds,enabled,custom_header,worker_count,created_at)
-                    VALUES (%(id)s,%(name)s,%(type)s,%(endpoint)s,%(description)s,%(timeout)s,%(delay_seconds)s,%(enabled)s,%(custom_header)s::jsonb,%(worker_count)s,%(created_at)s)
+                    (id,name,type,endpoint,endpoints,description,timeout,delay_seconds,enabled,custom_header,worker_count,created_at)
+                    VALUES (%(id)s,%(name)s,%(type)s,%(endpoint)s,%(endpoints)s::jsonb,%(description)s,%(timeout)s,%(delay_seconds)s,%(enabled)s,%(custom_header)s::jsonb,%(worker_count)s,%(created_at)s)
                     ON CONFLICT (id) DO UPDATE SET
-                      name=EXCLUDED.name, type=EXCLUDED.type, endpoint=EXCLUDED.endpoint, description=EXCLUDED.description,
-                      timeout=EXCLUDED.timeout, delay_seconds=EXCLUDED.delay_seconds, enabled=EXCLUDED.enabled,
-                      custom_header=EXCLUDED.custom_header, worker_count=EXCLUDED.worker_count
+                      name=EXCLUDED.name, type=EXCLUDED.type, endpoint=EXCLUDED.endpoint, endpoints=EXCLUDED.endpoints,
+                      description=EXCLUDED.description, timeout=EXCLUDED.timeout, delay_seconds=EXCLUDED.delay_seconds,
+                      enabled=EXCLUDED.enabled, custom_header=EXCLUDED.custom_header, worker_count=EXCLUDED.worker_count
                     """,
                     payload,
                 )
             except Exception as exc:
-                if "worker_count" in str(exc):
+                if "endpoints" in str(exc) or "worker_count" in str(exc):
                     cur.execute(
                         f"""
                         INSERT INTO {table}

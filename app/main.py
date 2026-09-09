@@ -125,9 +125,12 @@ async def lifespan(app: FastAPI):
         try:
              for svc in store_list_services():
                  sid = str(svc.get("id") or "")
-                 wc = int(svc.get("worker_count") or 1)
                  if sid:
-                     engine.get_or_create_pool(sid, wc)
+                     engine.get_or_create_pool(
+                         service_id=sid,
+                         endpoints=svc.get("endpoints"),
+                         worker_count=int(svc.get("worker_count") or 1),
+                     )
         except Exception as exc:
              logger.error("[STARTUP] Could not pre-create worker pools", exc_info=True)
 
@@ -222,13 +225,28 @@ async def exception_debug_middleware(request: Request, call_next):
 # Pydantic models
 # ---------------------------------------------------------------------------
 
+class ServiceEndpoint(BaseModel):
+    """A single backend endpoint URL with its own worker concurrency limit."""
+    url: str
+    workers: int = Field(default=1, ge=1, le=64)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        value = (value or "").strip()
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("Endpoint URL must start with http:// or https://")
+        return value
+
+
 class ServiceConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
-    url: str
     type: Literal["comfyui", "n8n", "custom", "omnivoice"]
+    url: Optional[str] = ""
+    endpoints: list[ServiceEndpoint] = Field(default_factory=list)
     description: Optional[str] = ""
     headers: dict = Field(default_factory=dict)
     timeout: int = Field(default=120, ge=1, le=3600)
@@ -237,18 +255,17 @@ class ServiceConfig(BaseModel):
     enabled: bool = True
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
-
-class WebhookEndpoint(BaseModel):
-    """A single webhook endpoint with its own worker concurrency limit."""
-    url: str
-    workers: int = Field(default=1, ge=1, le=64)
-
-    @field_validator("url")
-    @classmethod
-    def validate_url(cls, value: str) -> str:
-        if not value.startswith(("http://", "https://")):
-            raise ValueError("webhook endpoint url must start with http:// or https://")
-        return value
+    def normalize(self) -> "ServiceConfig":
+        """Ensure endpoints and primary url/worker_count stay in sync."""
+        if self.endpoints:
+            if not self.url or not self.url.strip():
+                self.url = self.endpoints[0].url
+            self.worker_count = sum(ep.workers for ep in self.endpoints)
+        elif self.url and self.url.strip():
+            self.endpoints = [ServiceEndpoint(url=self.url.strip(), workers=self.worker_count)]
+        else:
+            raise ValueError("Either 'url' or 'endpoints' must be provided.")
+        return self
 
 
 class DispatchRequest(BaseModel):
@@ -257,10 +274,7 @@ class DispatchRequest(BaseModel):
     metadata: dict = Field(default_factory=dict)
     scene_id: Optional[Any] = None
     priority: int = Field(default=5, ge=1, le=10)
-    # Legacy single-URL field — kept for backwards compatibility
     webhook_url: Optional[str] = None
-    # New multi-endpoint list — takes precedence over webhook_url when provided
-    webhook_endpoints: Optional[list[WebhookEndpoint]] = None
     delay_seconds: Optional[float] = Field(default=None, ge=0, le=3600)
 
     @field_validator("webhook_url")
@@ -271,19 +285,6 @@ class DispatchRequest(BaseModel):
         if not value.startswith(("http://", "https://")):
             raise ValueError("webhook_url must start with http:// or https://")
         return value
-
-    def resolved_webhook_endpoints(self) -> list[dict]:
-        """
-        Return the effective list of webhook endpoint dicts to pass to the engine.
-        - If webhook_endpoints is provided (and non-empty), use it.
-        - Otherwise fall back to wrapping webhook_url as a single endpoint.
-        - Returns an empty list when no webhook is configured.
-        """
-        if self.webhook_endpoints:
-            return [ep.model_dump() for ep in self.webhook_endpoints]
-        if self.webhook_url:
-            return [{"url": self.webhook_url, "workers": 1}]
-        return []
 
 
 class WorkerConcurrencyUpdate(BaseModel):
@@ -391,14 +392,19 @@ async def create_service(service: ServiceConfig):
     _require_storage()
     if store_get_service(service.id):
         return JSONResponse(status_code=200, content=jsonable_encoder(store_get_service(service.id)))
+    service.normalize()
     if (dup := _find_duplicate_service_name(service.name)):
         return JSONResponse(status_code=200, content=jsonable_encoder(dup))
-    if (dup := _find_duplicate_service(service.url, service.type)):
+    if service.url and (dup := _find_duplicate_service(service.url, service.type)):
         return JSONResponse(status_code=200, content=jsonable_encoder(dup))
     payload = service.model_dump()
     upsert_service(payload)
-    # Pre-create worker pool for the new service
-    engine.get_or_create_pool(service.id, service.worker_count)
+    # Pre-create worker pool for the new service with its endpoints
+    engine.get_or_create_pool(
+        service_id=service.id,
+        endpoints=payload.get("endpoints"),
+        worker_count=service.worker_count,
+    )
     return payload
 
 
@@ -421,14 +427,19 @@ async def update_service(service_id: str, service: ServiceConfig):
         raise HTTPException(404, "Service not found")
     if (dup := _find_duplicate_service_name(service.name, exclude_id=service_id)):
         return JSONResponse(status_code=200, content=jsonable_encoder(dup))
-    if _find_duplicate_service(service.url, service.type, exclude_id=service_id):
-        raise HTTPException(409, "Service with the same URL and type already exists")
     service.id = service_id
     service.created_at = existing.get("created_at", service.created_at)
+    service.normalize()
+    if service.url and _find_duplicate_service(service.url, service.type, exclude_id=service_id):
+        raise HTTPException(409, "Service with the same URL and type already exists")
     payload = service.model_dump()
     upsert_service(payload)
-    # Update the engine pool concurrency if worker_count changed
-    engine.set_concurrency(service_id, service.worker_count)
+    # Update the engine pool endpoints and concurrency
+    engine.update_pool(
+        service_id=service_id,
+        endpoints=payload.get("endpoints"),
+        worker_count=service.worker_count,
+    )
     return payload
 
 
@@ -495,13 +506,6 @@ async def dispatch(req: DispatchRequest):
     now = datetime.utcnow().isoformat()
     service_delay = float(service.get("delay_seconds", 3))
     effective_delay = req.delay_seconds if req.delay_seconds is not None else service_delay
-    worker_count = int(service.get("worker_count") or 1)
-
-    # Resolve webhook routing: multi-endpoint list takes precedence over single URL
-    webhook_endpoints = req.resolved_webhook_endpoints()
-    # For storage/display, keep the legacy webhook_url field pointing at the
-    # first endpoint (if any) so existing tooling can still read it.
-    legacy_webhook_url = webhook_endpoints[0]["url"] if webhook_endpoints else None
 
     record = {
         "id": request_id,
@@ -516,8 +520,7 @@ async def dispatch(req: DispatchRequest):
         "scene_id": req.scene_id if req.scene_id is not None else req.metadata.get("scene_id"),
         "priority": req.priority,
         "payload": req.payload,
-        "webhook_url": legacy_webhook_url,
-        "webhook_endpoints": webhook_endpoints,
+        "webhook_url": req.webhook_url,
         "delay_seconds": effective_delay,
     }
     upsert_request(record)
@@ -528,9 +531,9 @@ async def dispatch(req: DispatchRequest):
     await engine.enqueue(
         service_id=req.service_id,
         record=task_record,
-        worker_count=worker_count,
         delay=max(0.0, float(effective_delay)),
-        webhook_endpoints=webhook_endpoints,
+        endpoints=service.get("endpoints"),
+        worker_count=int(service.get("worker_count") or 1),
     )
 
     return JSONResponse(
@@ -540,7 +543,6 @@ async def dispatch(req: DispatchRequest):
             "status": "queued",
             "scene_id": record.get("scene_id"),
             "queue_depth": engine.queue_depth(req.service_id),
-            "webhook_endpoints": webhook_endpoints,
         },
     )
 
@@ -611,18 +613,14 @@ async def retry_request(request_id: str):
              else (service or {}).get("delay_seconds", 3)) or 0
         )
         worker_count = int((service or {}).get("worker_count") or 1)
-        # Restore the original webhook endpoints so the retry uses the same routing
-        webhook_endpoints = refreshed.get("webhook_endpoints") or []
-        if not webhook_endpoints and refreshed.get("webhook_url"):
-            webhook_endpoints = [{"url": refreshed["webhook_url"], "workers": 1}]
         task_record = dict(refreshed)
         task_record["delay_seconds"] = 0
         await engine.enqueue(
             service_id=str(refreshed.get("service_id")),
             record=task_record,
-            worker_count=worker_count,
             delay=max(0.0, countdown),
-            webhook_endpoints=webhook_endpoints,
+            endpoints=(service or {}).get("endpoints"),
+            worker_count=worker_count,
         )
     return {"request_id": request_id, "status": "queued", "updated": True}
 
@@ -648,12 +646,14 @@ async def get_workers():
     rows = []
     total = 0
     for s in services:
-        wc = int(s.get("worker_count") or 1)
+        endpoints = s.get("endpoints") or []
+        wc = sum(int(ep.get("workers", 1) or 1) for ep in endpoints) if endpoints else int(s.get("worker_count") or 1)
         total += wc
         rows.append({
             "service_id": s.get("id"),
             "service_name": s.get("name"),
             "workers": wc,
+            "endpoints": endpoints,
             "enabled": bool(s.get("enabled", True)),
             "queue_depth": engine.queue_depth(str(s.get("id"))),
         })

@@ -80,12 +80,12 @@ def process_dispatch_request(record: dict[str, Any]) -> dict[str, Any]:
         _update_request(record, {"status": "paused", "error": "Service is paused/disabled"})
         return {"status": "paused", "request_id": request_id}
 
-    service_url = _resolve_url(service.get("url"))
+    service_url = _resolve_url(record.get("target_url") or service.get("url"))
     webhook_url = _resolve_url(webhook_url)
     payload = record.get("payload")
 
     if record.get("status") != "running":
-        _update_request(record, {"status": "running", "error": None})
+        _update_request(record, {"status": "running", "target_url": service_url, "error": None})
 
     try:
         if delay_seconds > 0:
