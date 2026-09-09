@@ -238,13 +238,29 @@ class ServiceConfig(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
+class WebhookEndpoint(BaseModel):
+    """A single webhook endpoint with its own worker concurrency limit."""
+    url: str
+    workers: int = Field(default=1, ge=1, le=64)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("webhook endpoint url must start with http:// or https://")
+        return value
+
+
 class DispatchRequest(BaseModel):
     payload: Any
     service_id: str
     metadata: dict = Field(default_factory=dict)
     scene_id: Optional[Any] = None
     priority: int = Field(default=5, ge=1, le=10)
+    # Legacy single-URL field — kept for backwards compatibility
     webhook_url: Optional[str] = None
+    # New multi-endpoint list — takes precedence over webhook_url when provided
+    webhook_endpoints: Optional[list[WebhookEndpoint]] = None
     delay_seconds: Optional[float] = Field(default=None, ge=0, le=3600)
 
     @field_validator("webhook_url")
@@ -255,6 +271,19 @@ class DispatchRequest(BaseModel):
         if not value.startswith(("http://", "https://")):
             raise ValueError("webhook_url must start with http:// or https://")
         return value
+
+    def resolved_webhook_endpoints(self) -> list[dict]:
+        """
+        Return the effective list of webhook endpoint dicts to pass to the engine.
+        - If webhook_endpoints is provided (and non-empty), use it.
+        - Otherwise fall back to wrapping webhook_url as a single endpoint.
+        - Returns an empty list when no webhook is configured.
+        """
+        if self.webhook_endpoints:
+            return [ep.model_dump() for ep in self.webhook_endpoints]
+        if self.webhook_url:
+            return [{"url": self.webhook_url, "workers": 1}]
+        return []
 
 
 class WorkerConcurrencyUpdate(BaseModel):
@@ -468,6 +497,12 @@ async def dispatch(req: DispatchRequest):
     effective_delay = req.delay_seconds if req.delay_seconds is not None else service_delay
     worker_count = int(service.get("worker_count") or 1)
 
+    # Resolve webhook routing: multi-endpoint list takes precedence over single URL
+    webhook_endpoints = req.resolved_webhook_endpoints()
+    # For storage/display, keep the legacy webhook_url field pointing at the
+    # first endpoint (if any) so existing tooling can still read it.
+    legacy_webhook_url = webhook_endpoints[0]["url"] if webhook_endpoints else None
+
     record = {
         "id": request_id,
         "service_id": req.service_id,
@@ -481,7 +516,8 @@ async def dispatch(req: DispatchRequest):
         "scene_id": req.scene_id if req.scene_id is not None else req.metadata.get("scene_id"),
         "priority": req.priority,
         "payload": req.payload,
-        "webhook_url": req.webhook_url,
+        "webhook_url": legacy_webhook_url,
+        "webhook_endpoints": webhook_endpoints,
         "delay_seconds": effective_delay,
     }
     upsert_request(record)
@@ -494,6 +530,7 @@ async def dispatch(req: DispatchRequest):
         record=task_record,
         worker_count=worker_count,
         delay=max(0.0, float(effective_delay)),
+        webhook_endpoints=webhook_endpoints,
     )
 
     return JSONResponse(
@@ -503,6 +540,7 @@ async def dispatch(req: DispatchRequest):
             "status": "queued",
             "scene_id": record.get("scene_id"),
             "queue_depth": engine.queue_depth(req.service_id),
+            "webhook_endpoints": webhook_endpoints,
         },
     )
 
@@ -573,6 +611,10 @@ async def retry_request(request_id: str):
              else (service or {}).get("delay_seconds", 3)) or 0
         )
         worker_count = int((service or {}).get("worker_count") or 1)
+        # Restore the original webhook endpoints so the retry uses the same routing
+        webhook_endpoints = refreshed.get("webhook_endpoints") or []
+        if not webhook_endpoints and refreshed.get("webhook_url"):
+            webhook_endpoints = [{"url": refreshed["webhook_url"], "workers": 1}]
         task_record = dict(refreshed)
         task_record["delay_seconds"] = 0
         await engine.enqueue(
@@ -580,6 +622,7 @@ async def retry_request(request_id: str):
             record=task_record,
             worker_count=worker_count,
             delay=max(0.0, countdown),
+            webhook_endpoints=webhook_endpoints,
         )
     return {"request_id": request_id, "status": "queued", "updated": True}
 

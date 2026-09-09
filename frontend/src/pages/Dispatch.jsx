@@ -40,6 +40,7 @@ function ResultCard({ result }) {
   if (!result) return null
   const hasResponse = result.response !== undefined && result.response !== null
   const hasError = result.error !== undefined && result.error !== null
+  const endpoints = result.webhook_endpoints || []
 
   return (
     <div style={{
@@ -62,6 +63,26 @@ function ResultCard({ result }) {
           ? 'Worker will pick this up shortly.'
           : 'Service is paused or completed.'}
       </div>
+      {endpoints.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9, color: 'var(--text-3)', letterSpacing: '.08em', textTransform: 'uppercase' }}>
+            Webhook Endpoints
+          </div>
+          {endpoints.map((ep, i) => (
+            <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10 }}>
+              <span style={{ color: 'var(--cyan)', fontFamily: 'var(--font-mono)', fontSize: 9 }}>
+                [{i + 1}]
+              </span>
+              <span style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>
+                {ep.url}
+              </span>
+              <span style={{ color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
+                ×{ep.workers} worker{ep.workers !== 1 ? 's' : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       {hasResponse && (
         <div>
           <div style={{ fontSize: 9, color: 'var(--text-3)', letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 4 }}>
@@ -80,13 +101,130 @@ function ResultCard({ result }) {
     </div>
   )
 }
+
+// ---------------------------------------------------------------------------
+// Webhook Endpoints Editor
+// ---------------------------------------------------------------------------
+
+function WebhookEndpointsEditor({ endpoints, onChange }) {
+  const addEndpoint = () => {
+    onChange([...endpoints, { url: '', workers: 1 }])
+  }
+
+  const removeEndpoint = (idx) => {
+    onChange(endpoints.filter((_, i) => i !== idx))
+  }
+
+  const updateEndpoint = (idx, field, value) => {
+    onChange(endpoints.map((ep, i) => i === idx ? { ...ep, [field]: value } : ep))
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <label style={labelStyle}>
+          Webhook Endpoints
+          <span style={{ color: 'var(--text-3)', marginLeft: 6, textTransform: 'none', letterSpacing: 0 }}>
+            — filled in order; queue when all full
+          </span>
+        </label>
+        <button onClick={addEndpoint} style={{ ...btnGhost, padding: '3px 10px', fontSize: 10 }}>
+          + Add Endpoint
+        </button>
+      </div>
+
+      {endpoints.length === 0 ? (
+        <div style={{
+          border: '1px dashed var(--border-2)', borderRadius: 6,
+          padding: '12px 14px', textAlign: 'center',
+          color: 'var(--text-3)', fontSize: 10,
+        }}>
+          No webhook endpoints — click "Add Endpoint" to add one
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {endpoints.map((ep, idx) => (
+            <div key={idx} style={{
+              display: 'grid', gridTemplateColumns: '24px 1fr 80px 28px',
+              gap: 6, alignItems: 'center',
+            }}>
+              {/* Slot number badge */}
+              <div style={{
+                fontSize: 9, fontWeight: 700, color: 'var(--cyan)',
+                fontFamily: 'var(--font-mono)', textAlign: 'center',
+              }}>
+                [{idx + 1}]
+              </div>
+
+              {/* URL input */}
+              <input
+                type="url"
+                value={ep.url}
+                onChange={e => updateEndpoint(idx, 'url', e.target.value)}
+                placeholder="https://your-webhook.example.com/done"
+                style={{
+                  ...inputStyle,
+                  borderColor: ep.url && !ep.url.startsWith('http') ? 'var(--rose)' : 'var(--border-2)',
+                }}
+              />
+
+              {/* Workers number input */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input
+                  type="number"
+                  value={ep.workers}
+                  min={1}
+                  max={64}
+                  onChange={e => updateEndpoint(idx, 'workers', Math.max(1, parseInt(e.target.value) || 1))}
+                  style={{ ...inputStyle, textAlign: 'center', padding: '8px 4px' }}
+                  title="Max concurrent jobs for this endpoint"
+                />
+                <span style={{ fontSize: 9, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>workers</span>
+              </div>
+
+              {/* Remove button */}
+              <button
+                onClick={() => removeEndpoint(idx)}
+                style={{
+                  ...btnGhost, padding: '4px 6px', fontSize: 13,
+                  color: 'var(--rose)', lineHeight: 1,
+                }}
+                title="Remove this endpoint"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {endpoints.length > 1 && (
+        <div style={{
+          fontSize: 9, color: 'var(--text-3)', padding: '6px 10px',
+          background: 'rgba(99,102,241,.06)', borderRadius: 6,
+          border: '1px solid rgba(99,102,241,.15)',
+        }}>
+          💡 Requests fill endpoint [1] first (up to its worker limit), then [2], etc.
+          When all endpoints are full, new requests queue and are assigned to whichever
+          endpoint finishes first.
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main Dispatch page
+// ---------------------------------------------------------------------------
+
 export default function Dispatch({ services, refresh, toast }) {
   const [serviceId, setServiceId] = useState('')
   const [priority,  setPriority]  = useState('5')
   const [delaySeconds, setDelaySeconds] = useState('')
   const [payload,   setPayload]   = useState('')
   const [metadata,  setMetadata]  = useState('{}')
-  const [webhook,   setWebhook]   = useState('')
+  // Webhook endpoints list: [{url, workers}]
+  const [webhookEndpoints, setWebhookEndpoints] = useState([])
   const [result,    setResult]    = useState(null)
   const [sending,   setSending]   = useState(false)
   const [history,   setHistory]   = useState([])
@@ -99,16 +237,32 @@ export default function Dispatch({ services, refresh, toast }) {
     try { parsedMeta = JSON.parse(metadata || '{}') }
     catch { toast('Metadata must be valid JSON', 'error'); return }
 
+    // Build webhook_endpoints, filtering out rows with empty URLs
+    const validEndpoints = webhookEndpoints.filter(ep => ep.url.trim())
+
+    // Validate URLs
+    for (const ep of validEndpoints) {
+      if (!ep.url.startsWith('http://') && !ep.url.startsWith('https://')) {
+        toast(`Webhook URL must start with http:// or https://: ${ep.url}`, 'error')
+        return
+      }
+    }
+
     setSending(true)
     try {
-      const r = await api.dispatch({
+      const body = {
         service_id:  serviceId,
         payload:     parsedPayload,
         metadata:    parsedMeta,
         priority:    parseInt(priority) || 5,
         delay_seconds: delaySeconds === '' ? null : Math.max(0, Number(delaySeconds) || 0),
-        webhook_url: webhook || null,
-      })
+      }
+
+      if (validEndpoints.length > 0) {
+        body.webhook_endpoints = validEndpoints
+      }
+
+      const r = await api.dispatch(body)
       setResult(r)
       setHistory(h => [{ ...r, service_name: services.find(s => s.id === serviceId)?.name, ts: new Date().toISOString() }, ...h.slice(0, 9)])
       toast(`Dispatched ${r.request_id.slice(0, 8)}`, 'success')
@@ -124,6 +278,14 @@ export default function Dispatch({ services, refresh, toast }) {
     setPayload(JSON.stringify(COMFYUI_EXAMPLE, null, 2))
     setMetadata(JSON.stringify({ source: 'manual', workflow: 'infinite-talk', triggered_by: 'dashboard' }, null, 2))
     toast('ComfyUI example loaded', 'info')
+  }
+
+  const handleClear = () => {
+    setPayload('')
+    setMetadata('{}')
+    setWebhookEndpoints([])
+    setDelaySeconds('')
+    setResult(null)
   }
 
   return (
@@ -178,21 +340,15 @@ export default function Dispatch({ services, refresh, toast }) {
           <JsonEditor label="Payload (JSON)" value={payload} onChange={setPayload} minHeight={200} />
           <JsonEditor label="Routing Metadata (JSON)" value={metadata} onChange={setMetadata} minHeight={72} />
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-            <label style={labelStyle}>Webhook URL (optional - called on completion)</label>
-            <input
-              type="url" value={webhook} onChange={e => setWebhook(e.target.value)}
-              placeholder="http://localhost:5678/webhook/done"
-              style={inputStyle}
-            />
-          </div>
+          {/* Multi-webhook endpoints editor */}
+          <WebhookEndpointsEditor endpoints={webhookEndpoints} onChange={setWebhookEndpoints} />
 
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <button onClick={handleDispatch} disabled={sending} style={{ ...btnPrimary, opacity: sending ? .6 : 1, minWidth: 120 }}>
               {sending ? 'Sending...' : '-> Dispatch'}
             </button>
             <button onClick={loadExample} style={btnGhost}>Load ComfyUI Example</button>
-            <button onClick={() => { setPayload(''); setMetadata('{}'); setWebhook(''); setDelaySeconds(''); setResult(null) }} style={{ ...btnGhost, marginLeft: 'auto', color: 'var(--text-3)' }}>
+            <button onClick={handleClear} style={{ ...btnGhost, marginLeft: 'auto', color: 'var(--text-3)' }}>
               Clear
             </button>
           </div>
@@ -223,6 +379,11 @@ export default function Dispatch({ services, refresh, toast }) {
                     {h.service_name}
                   </div>
                   <code style={{ fontSize: 9, color: 'var(--text-3)' }}>{h.request_id.slice(0, 16)}…</code>
+                  {h.webhook_endpoints?.length > 0 && (
+                    <div style={{ fontSize: 9, color: 'var(--text-3)' }}>
+                      {h.webhook_endpoints.length} webhook endpoint{h.webhook_endpoints.length !== 1 ? 's' : ''}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -242,5 +403,3 @@ const inputStyle = {
 const btnBase    = { fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, cursor: 'pointer', borderRadius: 6, padding: '8px 16px', border: '1px solid transparent', transition: 'all .15s' }
 const btnPrimary = { ...btnBase, background: 'var(--cyan)', color: '#000' }
 const btnGhost   = { ...btnBase, background: 'transparent', border: '1px solid var(--border-2)', color: 'var(--text-2)' }
-
-
